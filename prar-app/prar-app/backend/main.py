@@ -69,13 +69,15 @@ def _clean_num(value) -> str:
 
 
 def _clean_text(text: str) -> str:
-    inline_tags = r'<(b|i|em|strong|sup|sub|span)(\s[^>]*)?>.*?</\1>'
-    def unwrap(m):
-        inner = re.sub(r'<[^>]+>', '', m.group(0))
-        return inner
-    text = re.sub(inline_tags, unwrap, text, flags=re.IGNORECASE | re.DOTALL)
+    # Replace block-level tags with spaces to prevent word-merging
+    text = re.sub(r'<(p|div|br|li|tr|td|th)(\s[^>]*)?>',  ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'</(p|div|li|tr|td|th)>', ' ', text, flags=re.IGNORECASE)
+    # Strip all remaining tags
     text = re.sub(r'<[^>]+>', '', text)
+    # Decode HTML entities
     text = html.unescape(text)
+    # Collapse multiple spaces/newlines into single space
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
