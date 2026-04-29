@@ -9,7 +9,7 @@ const PART_COLORS = {
   "Part 4": { bg: "#F3E5F5", border: "#9C27B0", text: "#4A148C" },
 };
 
-export default function Stage5({ job, goToStage }) {
+export default function Stage5({ job, goToStage, onBack }) {
   const [downloading, setDownloading] = useState({});
   const [error, setError] = useState("");
 
@@ -150,7 +150,7 @@ export default function Stage5({ job, goToStage }) {
       </div>
 
       <div style={{ marginTop: 28, paddingTop: 20, borderTop: "1px solid #e0d6c8" }}>
-        <button onClick={() => goToStage(4)} style={{ ...btnOutline, marginRight: 12 }}>← Back to Generate</button>
+        <button onClick={onBack} style={{ ...btnOutline, marginRight: 12 }}>← Back to Dashboard</button>
         <span style={{ color: "#aaa", fontSize: 13 }}>
           This installment is saved. You can return to it anytime from the Dashboard.
         </span>

@@ -16,7 +16,7 @@ const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 
 export default function Stage4({ job, updateJob, goToStage }) {
   const ordinal = ORDINALS[job.installmentNumber] || `${job.installmentNumber}th`;
-  const introTemplate = `This is the ${ordinal} installment of the Peer-Reviewed Articles Review (PRAR), a periodic review of peer-reviewed articles published in academic journals relevant to the study of the Middle East and the broader Muslim world. The articles listed below were selected based on their relevance to the region and its peoples, and are arranged by journal title.`;
+  const introTemplate = `The Middle East Studies Pedagogy Initiative (MESPI) brings you the ${ordinal} in a series of "Peer-Reviewed Article Reviews" in which we present a collection of journals and their articles concerned with the Middle East and Arab world. This series will be published seasonally. Each issue will comprise three-to-four parts, depending on the number of articles included.`;
 
   const [introText, setIntroText] = useState(introTemplate);
   const [generating, setGenerating] = useState(false);
