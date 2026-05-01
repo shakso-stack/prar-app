@@ -24,15 +24,15 @@ function Phase1({ rows, setRows, onFetchComplete }) {
     setRows(prev => prev.filter(r => r.id !== id));
   }
 
-  const filled = rows.filter(r => r.volume && r.volume.trim());
+  const filled = rows.filter(r => (r.volume && r.volume.trim()) || (r.issue && r.issue.trim()));
   const filtered = rows.filter(r =>
     !filterText || r.journal.toLowerCase().includes(filterText.toLowerCase())
   );
 
   async function handleFetch() {
-    const toFetch = rows.filter(r => r.issn && r.volume);
+    const toFetch = rows.filter(r => r.issn && (r.volume || r.issue));
     if (toFetch.length === 0) {
-      setError("Please fill in at least one Volume field before fetching.");
+      setError("Please fill in at least one Volume or Issue field before fetching.");
       return;
     }
     setError("");
@@ -84,7 +84,7 @@ function Phase1({ rows, setRows, onFetchComplete }) {
         <div>
           <h2 style={h2}>Stage 1 — Fetch Articles</h2>
           <p style={{ color: "#7a6a5a", fontSize: 14, margin: 0 }}>
-            Fill in the Volume, Issue, and Year columns for the journals you want to include, then click Fetch Articles.
+            Fill in the Volume and/or Issue, and Year columns for the journals you want to include, then click Fetch Articles.
             {filled.length > 0 && <span style={{ color: "#d4af7a", marginLeft: 8 }}>{filled.length} journal{filled.length !== 1 ? "s" : ""} ready to fetch.</span>}
           </p>
         </div>
@@ -129,10 +129,10 @@ function Phase1({ rows, setRows, onFetchComplete }) {
           </thead>
           <tbody>
             {filtered.map((row, idx) => {
-              const highlight = row.volume && row.volume.trim();
+              const highlight = (row.volume && row.volume.trim()) || (row.issue && row.issue.trim());
               return (
                 <tr key={row.id} style={{
-                  background: highlight ? "#fffbf0" : idx % 2 === 0 ? "#fff" : "#faf8f5",
+                  background: highlight ? "#eef4ee" : idx % 2 === 0 ? "#fff" : "#faf8f5",
                   borderBottom: "1px solid #e8e0d4",
                 }}>
                   <td style={{ ...tdStyle, color: "#aaa", fontSize: 11, textAlign: "center" }}>{idx + 1}</td>
