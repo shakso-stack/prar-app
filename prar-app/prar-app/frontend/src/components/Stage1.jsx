@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { JOURNALS } from "../data";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 
@@ -118,9 +117,10 @@ function Phase1({ rows, setRows, onFetchComplete }) {
         </div>
       )}
 
-      <div style={{ overflowX: "auto", border: "1px solid #e0d6c8", borderRadius: 8, background: "#fff" }}>
+      <div style={{ border: "1px solid #e0d6c8", borderRadius: 8, overflow: "hidden" }}>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 320px)" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 700 }}>
-          <thead>
+          <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
             <tr style={{ background: "#2c1810" }}>
               <th style={{ ...thStyle, width: 36 }}>#</th>
               {COLS.map(c => <th key={c.key} style={{ ...thStyle, width: c.width }}>{c.label}</th>)}
@@ -164,6 +164,7 @@ function Phase1({ rows, setRows, onFetchComplete }) {
             })}
           </tbody>
         </table>
+        </div>
       </div>
       <div style={{ marginTop: 10, color: "#aaa", fontSize: 12 }}>
         {rows.length} journals · {filtered.length} shown · {filled.length} with volume filled
@@ -414,7 +415,7 @@ function Phase2({ results, setResults, articles, setArticles, onBack, onProceed 
 export default function Stage1({ job, updateJob, goToStage }) {
   const [rows, setRows] = useState(() => {
     if (job.journalIssues && job.journalIssues.length > 0) return job.journalIssues;
-    return JOURNALS.map((j, i) => ({ id: i + 1, ...j, volume: "", issue: "", year: "" }));
+    return [];
   });
   const [fetchResults, setFetchResults] = useState(() => job.fetchResults || null);
   const [articles, setArticles] = useState(() => job.articles || []);
@@ -453,6 +454,6 @@ const h2 = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 22, 
 const inputStyle = { padding: "6px 12px", border: "1px solid #d0c8b8", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 13, background: "#fff" };
 const btnPrimary = { background: "#2c1810", color: "#d4af7a", border: "none", padding: "8px 20px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 14, cursor: "pointer", fontWeight: 600 };
 const btnOutline = { background: "transparent", color: "#2c1810", border: "1px solid #2c1810", padding: "7px 16px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 13, cursor: "pointer" };
-const thStyle = { padding: "10px 8px", color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 12, fontWeight: 600, textAlign: "left", letterSpacing: 0.5, borderRight: "1px solid #4a2c1a" };
+const thStyle = { padding: "10px 8px", color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 12, fontWeight: 600, textAlign: "left", letterSpacing: 0.5, borderRight: "1px solid #4a2c1a", background: "#2c1810" };
 const tdStyle = { padding: "6px 8px", verticalAlign: "middle", borderRight: "1px solid #f0e8dc", fontFamily: "Crimson Text, serif" };
 const errorBox = { background: "#ff7c7c22", border: "1px solid #ff7c7c", borderRadius: 6, padding: "10px 16px", color: "#ff7c7c", marginBottom: 16, fontSize: 14 };

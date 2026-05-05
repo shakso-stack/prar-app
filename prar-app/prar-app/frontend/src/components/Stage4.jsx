@@ -138,6 +138,21 @@ export default function Stage4({ job, updateJob, goToStage }) {
         </div>
       )}
 
+      {/* Document preview */}
+      <DocumentPreview
+        articles={job.articles || []}
+        seasonYear={job.seasonYear}
+        introText={introText}
+        installmentNumber={job.installmentNumber}
+      />
+
+      {error && (
+        <div style={{ background: "#ff7c7c22", border: "1px solid #ff7c7c", borderRadius: 6, padding: "10px 16px", color: "#ff7c7c", marginBottom: 16, fontSize: 14 }}>
+          {error}
+          <div style={{ marginTop: 6, fontSize: 12 }}>Note: If this is the first request in a while, the backend may be waking up (30–60 seconds). Please try again.</div>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
         {!done ? (
           <button onClick={handleGenerate} disabled={generating} style={{ ...btnPrimary, opacity: generating ? 0.6 : 1, fontSize: 15, padding: "10px 28px" }}>
@@ -157,3 +172,90 @@ const h2 = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 22, 
 const btnPrimary = { background: "#2c1810", color: "#d4af7a", border: "none", padding: "8px 20px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 14, cursor: "pointer", fontWeight: 600 };
 const card = { background: "#fff", border: "1px solid #e0d6c8", borderRadius: 8, padding: "20px 24px", marginBottom: 20 };
 const cardTitle = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 16, fontWeight: 600, margin: "0 0 14px" };
+
+function DocumentPreview({ articles, seasonYear, introText, installmentNumber }) {
+  const [previewPart, setPreviewPart] = useState("Part 1");
+  const [showPreview, setShowPreview] = useState(false);
+
+  const partArticles = articles
+    .filter(a => a.part === previewPart)
+    .sort((a, b) => a.journal.localeCompare(b.journal))
+    .slice(0, 5);
+
+  return (
+    <div style={card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showPreview ? 14 : 0 }}>
+        <h3 style={{ ...cardTitle, margin: 0 }}>Document Preview</h3>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {showPreview && (
+            <select value={previewPart} onChange={e => setPreviewPart(e.target.value)} style={{
+              fontFamily: "Crimson Text, serif", fontSize: 13, padding: "4px 10px",
+              border: "1px solid #d0c8b8", borderRadius: 5, background: "#fff",
+            }}>
+              {["Part 1","Part 2","Part 3","Part 4"].map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          )}
+          <button onClick={() => setShowPreview(s => !s)} style={{
+            background: "transparent", color: "#2c1810", border: "1px solid #2c1810",
+            padding: "5px 14px", borderRadius: 5, fontFamily: "Crimson Text, serif",
+            fontSize: 13, cursor: "pointer",
+          }}>
+            {showPreview ? "▲ Hide Preview" : "▼ Show Preview"}
+          </button>
+        </div>
+      </div>
+
+      {showPreview && (
+        <div>
+          <div style={{ fontSize: 12, color: "#888", marginBottom: 14 }}>
+            Showing first {partArticles.length} articles of {articles.filter(a => a.part === previewPart).length} in {previewPart}
+          </div>
+          {/* Simulated document */}
+          <div style={{
+            background: "#fff", border: "1px solid #d0c8b8", borderRadius: 6,
+            padding: "32px 40px", fontFamily: "Garamond, Georgia, serif",
+            maxHeight: 500, overflowY: "auto", boxShadow: "inset 0 1px 4px rgba(0,0,0,0.06)",
+          }}>
+            {/* Document title */}
+            <div style={{ fontStyle: "italic", fontSize: 16, marginBottom: 16, color: "#2c1810" }}>
+              Peer-Reviewed Articles Review: {seasonYear} ({previewPart})
+            </div>
+            {/* Intro */}
+            <div style={{ fontSize: 13, lineHeight: 1.7, marginBottom: 24, color: "#333" }}>
+              {introText}
+            </div>
+            {/* Articles */}
+            {partArticles.length === 0 ? (
+              <div style={{ color: "#aaa", fontSize: 13, fontStyle: "italic" }}>No articles in this part.</div>
+            ) : (
+              partArticles.map((art, i) => {
+                const showJournal = i === 0 || art.journal !== partArticles[i - 1].journal;
+                return (
+                  <div key={i} style={{ marginBottom: 18 }}>
+                    {showJournal && (
+                      <div style={{ fontStyle: "italic", fontSize: 13, color: "#2c1810", marginBottom: 6, marginTop: i > 0 ? 14 : 0 }}>
+                        {art.journal} (Volume {art.volume}, Issue {art.issue})
+                      </div>
+                    )}
+                    <div style={{ fontSize: 13, color: "#1a6bb5", marginBottom: 4 }}>
+                      {art.link
+                        ? <a href={art.link} target="_blank" rel="noopener noreferrer" style={{ color: "#1a6bb5" }}>{art.title}</a>
+                        : art.title}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#444", marginBottom: 3 }}>By: {art.author}</div>
+                    <div style={{ fontSize: 12, color: "#555", lineHeight: 1.5 }}>Abstract: {art.abstract}</div>
+                  </div>
+                );
+              })
+            )}
+            {articles.filter(a => a.part === previewPart).length > 5 && (
+              <div style={{ color: "#aaa", fontSize: 12, fontStyle: "italic", marginTop: 12, borderTop: "1px solid #eee", paddingTop: 10 }}>
+                … and {articles.filter(a => a.part === previewPart).length - 5} more articles
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
