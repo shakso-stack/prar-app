@@ -129,7 +129,7 @@ export default function Stage3({ job, updateJob, goToStage }) {
 
       {/* Table with frozen header */}
       <div style={{ border: "1px solid #e0d6c8", borderTop: "none", borderRadius: "0 0 8px 8px", overflow: "hidden" }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 420px)" }}>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
           <table style={{ borderCollapse: "collapse", width: "100%", tableLayout: "fixed" }}>
             <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
               <tr style={{ background: "#2c1810" }}>
