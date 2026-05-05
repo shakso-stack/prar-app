@@ -1,4 +1,5 @@
 const STORAGE_KEY = "prar_jobs";
+const MASTER_JOURNALS_KEY = "prar_master_journals";
 
 export function loadJobs() {
   try {
@@ -13,7 +14,26 @@ export function saveJobs(jobs) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
 }
 
-export function createJob(name, installmentNumber, seasonYear) {
+// Master journal list — stored separately from jobs
+export function loadMasterJournals(defaultJournals) {
+  try {
+    const raw = localStorage.getItem(MASTER_JOURNALS_KEY);
+    return raw ? JSON.parse(raw) : defaultJournals;
+  } catch {
+    return defaultJournals;
+  }
+}
+
+export function saveMasterJournals(journals) {
+  localStorage.setItem(MASTER_JOURNALS_KEY, JSON.stringify(journals));
+}
+
+export function resetMasterJournals(defaultJournals) {
+  localStorage.setItem(MASTER_JOURNALS_KEY, JSON.stringify(defaultJournals));
+  return defaultJournals;
+}
+
+export function createJob(name, installmentNumber, seasonYear, masterJournals) {
   return {
     id: Date.now().toString(),
     name,
@@ -22,7 +42,9 @@ export function createJob(name, installmentNumber, seasonYear) {
     stage: 1,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    journalIssues: [],
+    journalIssues: masterJournals.map((j, i) => ({
+      id: i + 1, ...j, volume: "", issue: "", year: "",
+    })),
     articles: [],
   };
 }

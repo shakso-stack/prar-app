@@ -26,7 +26,7 @@ export const JOURNALS = [
   { tier: "1", journal: "Journal of Qur'anic Studies", issn: "1755-1730" },
   { tier: "1", journal: "Journal of the Economic and Social History of the Orient", issn: "1568-5209" },
   { tier: "1", journal: "Mamluk Studies Review", issn: "2563-4240" },
-  { tier: "1", journal: "Mediterranean Politics", issn: "1471-6518" },
+  { tier: "1", journal: "Mediterranean Politics", issn: "1362-9395" },
   { tier: "1", journal: "MELA Notes", issn: "2158-5180" },
   { tier: "1", journal: "Middle East Critique", issn: "1943-6157" },
   { tier: "1", journal: "Middle East Law and Governance", issn: "1876-3375" },

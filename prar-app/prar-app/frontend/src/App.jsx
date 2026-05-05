@@ -5,24 +5,21 @@ import Stage2 from "./components/Stage2";
 import Stage3 from "./components/Stage3";
 import Stage4 from "./components/Stage4";
 import Stage5 from "./components/Stage5";
-import { loadJobs, saveJobs, updateJob } from "./store";
+import { loadJobs, saveJobs, updateJob, loadMasterJournals, saveMasterJournals } from "./store";
+import { JOURNALS } from "./data";
 
 export default function App() {
   const [jobs, setJobs] = useState(() => loadJobs());
+  const [masterJournals, setMasterJournals] = useState(() => loadMasterJournals(JOURNALS));
   const [activeJobId, setActiveJobId] = useState(null);
 
-  useEffect(() => {
-    saveJobs(jobs);
-  }, [jobs]);
+  useEffect(() => { saveJobs(jobs); }, [jobs]);
+  useEffect(() => { saveMasterJournals(masterJournals); }, [masterJournals]);
 
   const activeJob = jobs.find((j) => j.id === activeJobId) || null;
 
-  function setJobs_(next) {
-    setJobs(next);
-  }
-
   function updateActiveJob(updates) {
-    setJobs_((prev) => updateJob(prev, activeJobId, updates));
+    setJobs((prev) => updateJob(prev, activeJobId, updates));
   }
 
   function goToStage(stage) {
@@ -33,7 +30,9 @@ export default function App() {
     return (
       <Dashboard
         jobs={jobs}
-        setJobs={setJobs_}
+        setJobs={setJobs}
+        masterJournals={masterJournals}
+        setMasterJournals={setMasterJournals}
         onOpen={(id) => setActiveJobId(id)}
       />
     );
@@ -60,32 +59,13 @@ export default function App() {
 
 function StageNav({ job, goToStage, onBack }) {
   const stages = [
-    { n: 1, label: "Fetch" },
-    { n: 2, label: "Review" },
-    { n: 3, label: "Compile" },
-    { n: 4, label: "Generate" },
-    { n: 5, label: "Download" },
+    { n: 1, label: "Fetch" }, { n: 2, label: "Review" }, { n: 3, label: "Compile" },
+    { n: 4, label: "Generate" }, { n: 5, label: "Download" },
   ];
   return (
-    <div style={{
-      background: "#2c1810",
-      padding: "10px 24px",
-      display: "flex",
-      alignItems: "center",
-      gap: 16,
-      boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-      position: "sticky",
-      top: 0,
-      zIndex: 100,
-    }}>
-      <button onClick={onBack} style={{
-        background: "none", border: "1px solid rgba(255,255,255,0.3)",
-        color: "#d4af7a", padding: "4px 12px", borderRadius: 4,
-        cursor: "pointer", fontFamily: "Crimson Text, serif", fontSize: 13,
-      }}>← Dashboard</button>
-      <span style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 14, marginRight: 8 }}>
-        {job.name}
-      </span>
+    <div style={{ background: "#2c1810", padding: "10px 24px", display: "flex", alignItems: "center", gap: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.3)", position: "sticky", top: 0, zIndex: 100 }}>
+      <button onClick={onBack} style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", color: "#d4af7a", padding: "4px 12px", borderRadius: 4, cursor: "pointer", fontFamily: "Crimson Text, serif", fontSize: 13 }}>← Dashboard</button>
+      <span style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 14, marginRight: 8 }}>{job.name}</span>
       <div style={{ display: "flex", gap: 4, flex: 1 }}>
         {stages.map(({ n, label }) => {
           const done = job.stage > n;
