@@ -214,7 +214,7 @@ function DocumentPreview({ articles, seasonYear, introText, installmentNumber })
           <div style={{
             background: "#fff", border: "1px solid #d0c8b8", borderRadius: 6,
             padding: "32px 40px", fontFamily: "Garamond, Georgia, serif",
-            maxHeight: 500, overflowY: "auto", boxShadow: "inset 0 1px 4px rgba(0,0,0,0.06)",
+            maxHeight: "70vh", overflowY: "auto", boxShadow: "inset 0 1px 4px rgba(0,0,0,0.06)",
           }}>
             {/* Document title */}
             <div style={{ fontStyle: "italic", fontSize: 16, marginBottom: 16, color: "#2c1810" }}>

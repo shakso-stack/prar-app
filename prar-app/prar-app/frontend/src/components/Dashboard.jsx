@@ -131,7 +131,7 @@ function ManageJournals({ masterJournals, setMasterJournals, onClose }) {
 
       {/* Table */}
       <div style={{ border: "1px solid #5a3a28", borderRadius: 8, overflow: "hidden" }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 400 }}>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
           <table style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
               <tr style={{ background: "#1a0f0a" }}>

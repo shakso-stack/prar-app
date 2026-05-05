@@ -118,7 +118,7 @@ function Phase1({ rows, setRows, onFetchComplete }) {
       )}
 
       <div style={{ border: "1px solid #e0d6c8", borderRadius: 8, overflow: "hidden" }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 320px)" }}>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 700 }}>
           <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
             <tr style={{ background: "#2c1810" }}>
