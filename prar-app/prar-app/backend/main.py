@@ -56,6 +56,7 @@ class GenerateRequest(BaseModel):
     installment_number: int
     season_year: str
     articles: List[Article]
+    intro_override: Optional[str] = None
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -409,13 +410,16 @@ def generate(req: GenerateRequest):
     import lxml.etree as etree
 
     ordinal = number_to_ordinal_words(req.installment_number)
-    intro_text = (
-        f"This is the {ordinal} installment of the Peer-Reviewed Articles Review (PRAR), "
-        f"a periodic review of peer-reviewed articles published in academic journals "
-        f"relevant to the study of the Middle East and the broader Muslim world. "
-        f"The articles listed below were selected based on their relevance to the region "
-        f"and its peoples, and are arranged by journal title."
-    )
+    if req.intro_override and req.intro_override.strip():
+        intro_text = req.intro_override.strip()
+    else:
+        intro_text = (
+            f"This is the {ordinal} installment of the Peer-Reviewed Articles Review (PRAR), "
+            f"a periodic review of peer-reviewed articles published in academic journals "
+            f"relevant to the study of the Middle East and the broader Muslim world. "
+            f"The articles listed below were selected based on their relevance to the region "
+            f"and its peoples, and are arranged by journal title."
+        )
 
     def add_hyperlink(paragraph, text, url):
         part = paragraph.part
@@ -424,14 +428,38 @@ def generate(req: GenerateRequest):
         hyperlink.set(qn("r:id"), r_id)
         new_run = OxmlElement("w:r")
         rPr = OxmlElement("w:rPr")
-        rStyle = OxmlElement("w:rStyle")
-        rStyle.set(qn("w:val"), "Hyperlink")
-        rPr.append(rStyle)
+
+        # Font: Garamond 11pt (match set_font helper)
+        rFonts = OxmlElement("w:rFonts")
+        rFonts.set(qn("w:ascii"), "Garamond")
+        rFonts.set(qn("w:hAnsi"), "Garamond")
+        rFonts.set(qn("w:cs"), "Garamond")
+        rPr.append(rFonts)
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), "22")  # half-points: 22 = 11pt
+        rPr.append(sz)
+        szCs = OxmlElement("w:szCs")
+        szCs.set(qn("w:val"), "22")
+        rPr.append(szCs)
+
+        # Italic
         i_elem = OxmlElement("w:i")
         rPr.append(i_elem)
+
+        # Blue color (standard hyperlink blue)
+        color = OxmlElement("w:color")
+        color.set(qn("w:val"), "0563C1")
+        rPr.append(color)
+
+        # Underline
+        u = OxmlElement("w:u")
+        u.set(qn("w:val"), "single")
+        rPr.append(u)
+
         new_run.append(rPr)
         t = OxmlElement("w:t")
         t.text = text
+        t.set(qn("xml:space"), "preserve")
         new_run.append(t)
         hyperlink.append(new_run)
         paragraph._p.append(hyperlink)
@@ -482,7 +510,7 @@ def generate(req: GenerateRequest):
             intro_para = doc.add_paragraph()
             intro_para.paragraph_format.space_after = Pt(12)
             intro_run = intro_para.add_run(intro_text)
-            set_font(intro_run)
+            set_font(intro_run, italic=True)
 
             # Articles
             seen_journals = set()
@@ -501,11 +529,12 @@ def generate(req: GenerateRequest):
                 title_para = doc.add_paragraph()
                 title_para.paragraph_format.space_before = Pt(8)
                 title_para.paragraph_format.space_after = Pt(2)
+                clean_title = re.sub(r'\s+', ' ', article.title).strip()
                 if article.link:
-                    add_hyperlink(title_para, article.title, article.link)
+                    add_hyperlink(title_para, clean_title, article.link)
                 else:
-                    t_run = title_para.add_run(article.title)
-                    set_font(t_run)
+                    t_run = title_para.add_run(clean_title)
+                    set_font(t_run, italic=True)
 
                 # Author
                 author_para = doc.add_paragraph()
