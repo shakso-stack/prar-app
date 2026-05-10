@@ -414,11 +414,11 @@ def generate(req: GenerateRequest):
         intro_text = req.intro_override.strip()
     else:
         intro_text = (
-            f"This is the {ordinal} installment of the Peer-Reviewed Articles Review (PRAR), "
-            f"a periodic review of peer-reviewed articles published in academic journals "
-            f"relevant to the study of the Middle East and the broader Muslim world. "
-            f"The articles listed below were selected based on their relevance to the region "
-            f"and its peoples, and are arranged by journal title."
+            f'The Middle East Studies Pedagogy Initiative (MESPI) brings you the {ordinal} '
+            f'in a series of "Peer-Reviewed Article Reviews" in which we present a collection '
+            f'of journals and their articles concerned with the Middle East and Arab world. '
+            f'This series will be published seasonally. Each issue will comprise three-to-four '
+            f'parts, depending on the number of articles included.'
         )
 
     def add_hyperlink(paragraph, text, url):
@@ -441,10 +441,6 @@ def generate(req: GenerateRequest):
         szCs = OxmlElement("w:szCs")
         szCs.set(qn("w:val"), "22")
         rPr.append(szCs)
-
-        # Italic
-        i_elem = OxmlElement("w:i")
-        rPr.append(i_elem)
 
         # Blue color (standard hyperlink blue)
         color = OxmlElement("w:color")
@@ -504,9 +500,9 @@ def generate(req: GenerateRequest):
             title_run.font.name = "Garamond"
             title_run.font.size = Pt(14)
             title_run.font.bold = False
-            title_run.font.italic = True
+            title_run.font.italic = False
 
-            # Intro paragraph
+            # Intro paragraph (italic)
             intro_para = doc.add_paragraph()
             intro_para.paragraph_format.space_after = Pt(12)
             intro_run = intro_para.add_run(intro_text)
@@ -515,17 +511,18 @@ def generate(req: GenerateRequest):
             # Articles
             seen_journals = set()
             for article in part_articles:
-                # Journal header (italic, only first occurrence)
-                journal_display = f"{article.journal} (Volume {article.volume}, Issue {article.issue})"
+                # Journal header (only first occurrence): journal name italic, "(Volume X, Issue Y)" not italic
                 if article.journal not in seen_journals:
                     j_para = doc.add_paragraph()
                     j_para.paragraph_format.space_before = Pt(10)
                     j_para.paragraph_format.space_after = Pt(2)
-                    j_run = j_para.add_run(journal_display)
-                    set_font(j_run, size_pt=11, italic=True)
+                    j_run_name = j_para.add_run(article.journal)
+                    set_font(j_run_name, size_pt=11, italic=True)
+                    j_run_meta = j_para.add_run(f" (Volume {article.volume}, Issue {article.issue})")
+                    set_font(j_run_meta, size_pt=11, italic=False)
                     seen_journals.add(article.journal)
 
-                # Title as hyperlink
+                # Title as hyperlink (whitespace-cleaned, NOT italic)
                 title_para = doc.add_paragraph()
                 title_para.paragraph_format.space_before = Pt(8)
                 title_para.paragraph_format.space_after = Pt(2)
@@ -534,7 +531,7 @@ def generate(req: GenerateRequest):
                     add_hyperlink(title_para, clean_title, article.link)
                 else:
                     t_run = title_para.add_run(clean_title)
-                    set_font(t_run, italic=True)
+                    set_font(t_run)
 
                 # Author
                 author_para = doc.add_paragraph()
