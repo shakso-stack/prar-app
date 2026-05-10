@@ -24,6 +24,7 @@ export default function Stage5({ job, goToStage, onBack }) {
           installment_number: job.installmentNumber,
           season_year: job.seasonYear,
           articles: job.articles,
+          intro_override: job.introText || null,
         }),
       });
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);

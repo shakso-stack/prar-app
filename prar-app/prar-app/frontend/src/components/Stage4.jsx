@@ -18,7 +18,7 @@ export default function Stage4({ job, updateJob, goToStage }) {
   const ordinal = ORDINALS[job.installmentNumber] || `${job.installmentNumber}th`;
   const introTemplate = `The Middle East Studies Pedagogy Initiative (MESPI) brings you the ${ordinal} in a series of "Peer-Reviewed Article Reviews" in which we present a collection of journals and their articles concerned with the Middle East and Arab world. This series will be published seasonally. Each issue will comprise three-to-four parts, depending on the number of articles included.`;
 
-  const [introText, setIntroText] = useState(introTemplate);
+  const [introText, setIntroText] = useState(job.introText || introTemplate);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
@@ -47,7 +47,7 @@ export default function Stage4({ job, updateJob, goToStage }) {
       const blob = await resp.blob();
       setZipBlob(blob);
       setDone(true);
-      updateJob({ stage: 5, zipBlob: null }); // don't store blob in localStorage
+      updateJob({ stage: 5, introText, zipBlob: null }); // persist intro so Stage 5 can re-download with it
     } catch (e) {
       setError("Generation failed: " + e.message);
     } finally {

@@ -172,7 +172,7 @@ function ManageJournals({ masterJournals, setMasterJournals, onClose }) {
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
-export default function Dashboard({ jobs, setJobs, masterJournals, setMasterJournals, onOpen }) {
+export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJournals, setMasterJournals, onOpen }) {
   const [showNew, setShowNew] = useState(false);
   const [showManage, setShowManage] = useState(false);
   const [form, setForm] = useState({ name: "", installmentNumber: "", seasonYear: "" });
@@ -185,13 +185,13 @@ export default function Dashboard({ jobs, setJobs, masterJournals, setMasterJour
       return setError("Please enter a valid installment number.");
     if (!form.seasonYear.trim()) return setError("Please enter a season/year (e.g. Fall 2024).");
     const job = createJob(form.name.trim(), parseInt(form.installmentNumber), form.seasonYear.trim(), masterJournals);
-    setJobs([job, ...jobs]);
+    addJob(job);
     onOpen(job.id);
   }
 
   function handleDelete(id, name) {
     if (window.confirm(`Delete "${name}"? This cannot be undone.`)) {
-      setJobs(deleteJob(jobs, id));
+      removeJob(id);
     }
   }
 
@@ -217,7 +217,7 @@ export default function Dashboard({ jobs, setJobs, masterJournals, setMasterJour
             <input ref={importRef} type="file" accept=".json" style={{ display: "none" }}
               onChange={e => {
                 const file = e.target.files[0];
-                if (file) importJob(file, (job) => setJobs([job, ...jobs]));
+                if (file) importJob(file, (job) => addJob(job));
                 e.target.value = "";
               }} />
             <button onClick={() => setShowManage(s => !s)} style={{

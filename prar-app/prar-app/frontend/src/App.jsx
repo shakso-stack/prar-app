@@ -1,36 +1,103 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Dashboard from "./components/Dashboard";
 import Stage1 from "./components/Stage1";
 import Stage2 from "./components/Stage2";
 import Stage3 from "./components/Stage3";
 import Stage4 from "./components/Stage4";
 import Stage5 from "./components/Stage5";
-import { loadJobs, saveJobs, updateJob, loadMasterJournals, saveMasterJournals } from "./store";
+import {
+  loadJobsAsync, saveJobAsync, deleteJobAsync,
+  loadMasterJournalsAsync, saveMasterJournalsAsync,
+  updateJob, deleteJob, loadMasterJournals, saveMasterJournals,
+} from "./store";
 import { JOURNALS } from "./data";
+import { supabaseReady } from "./supabase";
 
 export default function App() {
-  const [jobs, setJobs] = useState(() => loadJobs());
+  const [jobs, setJobs] = useState([]);
   const [masterJournals, setMasterJournals] = useState(() => loadMasterJournals(JOURNALS));
   const [activeJobId, setActiveJobId] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => { saveJobs(jobs); }, [jobs]);
-  useEffect(() => { saveMasterJournals(masterJournals); }, [masterJournals]);
+  // Load jobs and master journals on mount
+  useEffect(() => {
+    async function init() {
+      setLoading(true);
+      const [loadedJobs, loadedJournals] = await Promise.all([
+        loadJobsAsync(),
+        loadMasterJournalsAsync(JOURNALS),
+      ]);
+      setJobs(loadedJobs);
+      setMasterJournals(loadedJournals);
+      setLoading(false);
+    }
+    init();
+  }, []);
+
+  // Save master journals whenever they change
+  useEffect(() => {
+    saveMasterJournalsAsync(masterJournals);
+    saveMasterJournals(masterJournals); // keep localStorage in sync as backup
+  }, [masterJournals]);
 
   const activeJob = jobs.find((j) => j.id === activeJobId) || null;
 
-  function updateActiveJob(updates) {
-    setJobs((prev) => updateJob(prev, activeJobId, updates));
+  async function handleSetJobs(nextJobs) {
+    // Find what changed and persist just that job
+    if (Array.isArray(nextJobs)) {
+      // deletion: find which job was removed
+      if (nextJobs.length < jobs.length) {
+        const removedId = jobs.find(j => !nextJobs.find(nj => nj.id === j.id))?.id;
+        if (removedId) await deleteJobAsync(removedId);
+      }
+      setJobs(nextJobs);
+    }
+  }
+
+  async function addJob(job) {
+    await saveJobAsync(job);
+    setJobs(prev => [job, ...prev]);
+  }
+
+  async function updateActiveJob(updates) {
+    const updatedJobs = updateJob(jobs, activeJobId, updates);
+    setJobs(updatedJobs);
+    const updatedJob = updatedJobs.find(j => j.id === activeJobId);
+    if (updatedJob) await saveJobAsync(updatedJob);
+  }
+
+  async function removeJob(jobId) {
+    await deleteJobAsync(jobId);
+    setJobs(prev => deleteJob(prev, jobId));
   }
 
   function goToStage(stage) {
     updateActiveJob({ stage });
   }
 
+  if (loading) {
+    return (
+      <div style={{
+        minHeight: "100vh", background: "#1a0f0a",
+        display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", gap: 16,
+      }}>
+        <div style={{ width: 48, height: 48, border: "3px solid #d4af7a", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+        <div style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 16 }}>
+          {supabaseReady ? "Loading from Supabase..." : "Loading..."}
+        </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
   if (!activeJob) {
     return (
       <Dashboard
         jobs={jobs}
-        setJobs={setJobs}
+        setJobs={handleSetJobs}
+        addJob={addJob}
+        removeJob={removeJob}
         masterJournals={masterJournals}
         setMasterJournals={setMasterJournals}
         onOpen={(id) => setActiveJobId(id)}

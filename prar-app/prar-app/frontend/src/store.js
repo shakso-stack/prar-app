@@ -1,23 +1,132 @@
-const STORAGE_KEY = "prar_jobs";
-const MASTER_JOURNALS_KEY = "prar_master_journals";
+/**
+ * PRAR Store
+ * Primary storage: Supabase (shared across all users/devices)
+ * Fallback: localStorage (if Supabase env vars not set)
+ *
+ * Supabase table required:
+ *   Table name: prar_jobs
+ *   Columns:
+ *     id          text  primary key
+ *     data        jsonb
+ *     created_at  timestamptz default now()
+ *     updated_at  timestamptz default now()
+ *
+ * Supabase table required:
+ *   Table name: prar_settings
+ *   Columns:
+ *     key         text  primary key
+ *     value       jsonb
+ */
 
-export function loadJobs() {
+import { supabase, supabaseReady } from "./supabase";
+
+const LS_JOBS_KEY     = "prar_jobs";
+const LS_JOURNALS_KEY = "prar_master_journals";
+
+// ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+export async function loadJobsAsync() {
+  if (supabaseReady) {
+    const { data, error } = await supabase
+      .from("prar_jobs")
+      .select("id, data, updated_at")
+      .order("updated_at", { ascending: false });
+    if (error) {
+      console.error("Supabase loadJobs error:", error);
+      return [];
+    }
+    return data.map(row => ({ ...row.data, id: row.id }));
+  }
+  // localStorage fallback
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(LS_JOBS_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 }
 
-export function saveJobs(jobs) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
+export async function saveJobAsync(job) {
+  if (supabaseReady) {
+    const { error } = await supabase
+      .from("prar_jobs")
+      .upsert({
+        id: job.id,
+        data: job,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "id" });
+    if (error) console.error("Supabase saveJob error:", error);
+    return;
+  }
+  // localStorage fallback
+  try {
+    const raw = localStorage.getItem(LS_JOBS_KEY);
+    const jobs = raw ? JSON.parse(raw) : [];
+    const idx = jobs.findIndex(j => j.id === job.id);
+    if (idx >= 0) jobs[idx] = job; else jobs.unshift(job);
+    localStorage.setItem(LS_JOBS_KEY, JSON.stringify(jobs));
+  } catch (e) {
+    console.error("localStorage saveJob error:", e);
+  }
 }
 
-// Master journal list — stored separately from jobs
+export async function deleteJobAsync(jobId) {
+  if (supabaseReady) {
+    const { error } = await supabase
+      .from("prar_jobs")
+      .delete()
+      .eq("id", jobId);
+    if (error) console.error("Supabase deleteJob error:", error);
+    return;
+  }
+  // localStorage fallback
+  try {
+    const raw = localStorage.getItem(LS_JOBS_KEY);
+    const jobs = raw ? JSON.parse(raw) : [];
+    localStorage.setItem(LS_JOBS_KEY, JSON.stringify(jobs.filter(j => j.id !== jobId)));
+  } catch (e) {
+    console.error("localStorage deleteJob error:", e);
+  }
+}
+
+// ─── Master journals ──────────────────────────────────────────────────────────
+
+export async function loadMasterJournalsAsync(defaultJournals) {
+  if (supabaseReady) {
+    const { data, error } = await supabase
+      .from("prar_settings")
+      .select("value")
+      .eq("key", "master_journals")
+      .single();
+    if (error || !data) return defaultJournals;
+    return data.value;
+  }
+  // localStorage fallback
+  try {
+    const raw = localStorage.getItem(LS_JOURNALS_KEY);
+    return raw ? JSON.parse(raw) : defaultJournals;
+  } catch {
+    return defaultJournals;
+  }
+}
+
+export async function saveMasterJournalsAsync(journals) {
+  if (supabaseReady) {
+    const { error } = await supabase
+      .from("prar_settings")
+      .upsert({ key: "master_journals", value: journals }, { onConflict: "key" });
+    if (error) console.error("Supabase saveMasterJournals error:", error);
+    return;
+  }
+  // localStorage fallback
+  localStorage.setItem(LS_JOURNALS_KEY, JSON.stringify(journals));
+}
+
+// ─── Synchronous helpers (kept for non-async contexts) ────────────────────────
+
 export function loadMasterJournals(defaultJournals) {
   try {
-    const raw = localStorage.getItem(MASTER_JOURNALS_KEY);
+    const raw = localStorage.getItem(LS_JOURNALS_KEY);
     return raw ? JSON.parse(raw) : defaultJournals;
   } catch {
     return defaultJournals;
@@ -25,13 +134,15 @@ export function loadMasterJournals(defaultJournals) {
 }
 
 export function saveMasterJournals(journals) {
-  localStorage.setItem(MASTER_JOURNALS_KEY, JSON.stringify(journals));
+  localStorage.setItem(LS_JOURNALS_KEY, JSON.stringify(journals));
 }
 
 export function resetMasterJournals(defaultJournals) {
-  localStorage.setItem(MASTER_JOURNALS_KEY, JSON.stringify(defaultJournals));
+  localStorage.setItem(LS_JOURNALS_KEY, JSON.stringify(defaultJournals));
   return defaultJournals;
 }
+
+// ─── Job helpers ──────────────────────────────────────────────────────────────
 
 export function createJob(name, installmentNumber, seasonYear, masterJournals) {
   return {
