@@ -1,19 +1,39 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import Dashboard from "./components/Dashboard";
 import Stage1 from "./components/Stage1";
 import Stage2 from "./components/Stage2";
 import Stage3 from "./components/Stage3";
 import Stage4 from "./components/Stage4";
 import Stage5 from "./components/Stage5";
+import SignIn from "./components/SignIn";
 import {
   loadJobsAsync, saveJobAsync, deleteJobAsync,
   loadMasterJournalsAsync, saveMasterJournalsAsync,
   updateJob, deleteJob, loadMasterJournals, saveMasterJournals,
 } from "./store";
 import { JOURNALS } from "./data";
-import { supabaseReady } from "./supabase";
+import { useAuth, signOut } from "./lib/auth";
 
 export default function App() {
+  const { session, user, loading: authLoading } = useAuth();
+
+  // ─── Sign-in gate ──────────────────────────────────────────────────────
+  // Until A2–A8 migrate the rest of the app to the new schema, the
+  // existing localStorage/legacy-supabase flow continues to power the
+  // dashboard and stages. Auth only gates whether the user sees them.
+
+  if (authLoading) {
+    return <FullScreenLoader message="Loading…" />;
+  }
+
+  if (!session) {
+    return <SignIn />;
+  }
+
+  return <AuthenticatedApp user={user} />;
+}
+
+function AuthenticatedApp({ user }) {
   const [jobs, setJobs] = useState([]);
   const [masterJournals, setMasterJournals] = useState(() => loadMasterJournals(JOURNALS));
   const [activeJobId, setActiveJobId] = useState(null);
@@ -43,9 +63,7 @@ export default function App() {
   const activeJob = jobs.find((j) => j.id === activeJobId) || null;
 
   async function handleSetJobs(nextJobs) {
-    // Find what changed and persist just that job
     if (Array.isArray(nextJobs)) {
-      // deletion: find which job was removed
       if (nextJobs.length < jobs.length) {
         const removedId = jobs.find(j => !nextJobs.find(nj => nj.id === j.id))?.id;
         if (removedId) await deleteJobAsync(removedId);
@@ -76,19 +94,7 @@ export default function App() {
   }
 
   if (loading) {
-    return (
-      <div style={{
-        minHeight: "100vh", background: "#1a0f0a",
-        display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center", gap: 16,
-      }}>
-        <div style={{ width: 48, height: 48, border: "3px solid #d4af7a", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-        <div style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 16 }}>
-          {supabaseReady ? "Loading from Supabase..." : "Loading..."}
-        </div>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </div>
-    );
+    return <FullScreenLoader message="Loading installments…" />;
   }
 
   if (!activeJob) {
@@ -114,7 +120,13 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8f6f1" }}>
-      <StageNav job={activeJob} goToStage={goToStage} onBack={() => setActiveJobId(null)} />
+      <StageNav
+        job={activeJob}
+        goToStage={goToStage}
+        onBack={() => setActiveJobId(null)}
+        user={user}
+        onSignOut={signOut}
+      />
       {activeJob.stage === 1 && <Stage1 {...stageProps} />}
       {activeJob.stage === 2 && <Stage2 {...stageProps} />}
       {activeJob.stage === 3 && <Stage3 {...stageProps} />}
@@ -124,14 +136,41 @@ export default function App() {
   );
 }
 
-function StageNav({ job, goToStage, onBack }) {
+function FullScreenLoader({ message }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        minHeight: "100vh", background: "#1a0f0a",
+        display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", gap: 16,
+      }}
+    >
+      <div
+        aria-hidden="true"
+        style={{
+          width: 48, height: 48,
+          border: "3px solid #d4af7a", borderTopColor: "transparent",
+          borderRadius: "50%", animation: "spin 0.8s linear infinite",
+        }}
+      />
+      <div style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 16 }}>
+        {message}
+      </div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+function StageNav({ job, goToStage, onBack, user, onSignOut }) {
   const stages = [
     { n: 1, label: "Fetch" }, { n: 2, label: "Review" }, { n: 3, label: "Compile" },
     { n: 4, label: "Generate" }, { n: 5, label: "Download" },
   ];
   return (
     <div style={{ background: "#2c1810", padding: "10px 24px", display: "flex", alignItems: "center", gap: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.3)", position: "sticky", top: 0, zIndex: 100 }}>
-      <button onClick={onBack} style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", color: "#d4af7a", padding: "4px 12px", borderRadius: 4, cursor: "pointer", fontFamily: "Crimson Text, serif", fontSize: 13 }}>← Dashboard</button>
+      <button onClick={onBack} style={navBtn}>← Dashboard</button>
       <span style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 14, marginRight: 8 }}>{job.name}</span>
       <div style={{ display: "flex", gap: 4, flex: 1 }}>
         {stages.map(({ n, label }) => {
@@ -152,6 +191,29 @@ function StageNav({ job, goToStage, onBack }) {
           );
         })}
       </div>
+      <UserMenu user={user} onSignOut={onSignOut} />
     </div>
   );
 }
+
+function UserMenu({ user, onSignOut }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
+      <span style={{ color: "rgba(212,175,122,0.7)", fontFamily: "Crimson Text, serif", fontSize: 12 }}>
+        {user?.email}
+      </span>
+      <button onClick={onSignOut} style={navBtn}>Sign out</button>
+    </div>
+  );
+}
+
+const navBtn = {
+  background: "none",
+  border: "1px solid rgba(255,255,255,0.3)",
+  color: "#d4af7a",
+  padding: "4px 12px",
+  borderRadius: 4,
+  cursor: "pointer",
+  fontFamily: "Crimson Text, serif",
+  fontSize: 13,
+};
