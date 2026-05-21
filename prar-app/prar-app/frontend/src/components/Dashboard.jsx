@@ -1,6 +1,13 @@
-import { useState, useRef } from "react";
-import { createJob, deleteJob, exportJob, importJob, formatDate, stageLabel, saveMasterJournals, resetMasterJournals } from "../store";
-import { JOURNALS } from "../data";
+import { useState, useRef, useMemo, useEffect } from "react";
+import { createJob, exportJob, importJob, formatDate } from "../store";
+import AccessibleGrid from "../lib/AccessibleGrid.jsx";
+import AddJournalModal from "./AddJournalModal.jsx";
+import { COLORS, FONTS, styles } from "../lib/styles";
+import {
+  addMasterJournal,
+  updateMasterJournal,
+  deleteMasterJournal,
+} from "../lib/db";
 
 const ORDINALS = {
   1:"first",2:"second",3:"third",4:"fourth",5:"fifth",6:"sixth",7:"seventh",
@@ -19,31 +26,34 @@ const STAGE_STEPS = [
   { n: 4, label: "Generate" }, { n: 5, label: "Download" },
 ];
 
+// ─── Progress bar ─────────────────────────────────────────────────────────────
+
 function ProgressBar({ currentStage }) {
   return (
-    <div style={{ marginTop: 10 }}>
+    <div style={{ marginTop: 8 }}>
       <div style={{ display: "flex", alignItems: "center" }}>
         {STAGE_STEPS.map((step, i) => {
           const done = currentStage > step.n;
           const active = currentStage === step.n;
           return (
             <div key={step.n} style={{ display: "flex", alignItems: "center", flex: 1 }}>
-              {i > 0 && <div style={{ height: 2, flex: 1, background: done || active ? "#d4af7a" : "rgba(255,255,255,0.15)", transition: "background 0.3s" }} />}
+              {i > 0 && <div style={{ height: 2, flex: 1, background: done || active ? COLORS.gold : COLORS.borderHair, transition: "background 0.3s" }} />}
               <div style={{
-                width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+                width: 22, height: 22, borderRadius: "50%", flexShrink: 0,
                 display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 11, fontWeight: 600, fontFamily: "Crimson Text, serif",
-                background: done ? "#d4af7a" : active ? "#2c1810" : "rgba(255,255,255,0.08)",
-                border: done || active ? "2px solid #d4af7a" : "2px solid rgba(255,255,255,0.2)",
-                color: done ? "#2c1810" : active ? "#d4af7a" : "rgba(255,255,255,0.3)",
+                fontSize: 10, fontWeight: 700, fontFamily: FONTS.serif,
+                background: done ? COLORS.gold : active ? COLORS.bgPanelDeep : "transparent",
+                border: done ? `2px solid ${COLORS.gold}` : active ? `2px solid ${COLORS.gold}` : `2px solid ${COLORS.borderSoft}`,
+                color: done ? COLORS.textOnGold : active ? COLORS.gold : COLORS.textFaint,
                 position: "relative",
+                transition: "all 0.2s ease",
               }}>
                 {done ? "✓" : step.n}
-                <div style={{ position: "absolute", top: 32, left: "50%", transform: "translateX(-50%)", fontSize: 10, whiteSpace: "nowrap", color: done || active ? "#d4af7a" : "rgba(255,255,255,0.25)", fontWeight: active ? 600 : 400 }}>
+                <div style={{ position: "absolute", top: 26, left: "50%", transform: "translateX(-50%)", fontSize: 10, whiteSpace: "nowrap", color: done || active ? COLORS.goldMuted : COLORS.textFaint, fontWeight: active ? 600 : 400, letterSpacing: "0.4px" }}>
                   {step.label}
                 </div>
               </div>
-              {i < STAGE_STEPS.length - 1 && <div style={{ height: 2, flex: 1, background: done ? "#d4af7a" : "rgba(255,255,255,0.15)", transition: "background 0.3s" }} />}
+              {i < STAGE_STEPS.length - 1 && <div style={{ height: 2, flex: 1, background: done ? COLORS.gold : COLORS.borderHair, transition: "background 0.3s" }} />}
             </div>
           );
         })}
@@ -53,118 +63,281 @@ function ProgressBar({ currentStage }) {
   );
 }
 
+// ─── Sort helpers ─────────────────────────────────────────────────────────────
+//
+// Master journals sort by (tier ascending, journal name ascending). Tier may
+// be null/empty — those sort to the end. Numeric tier values sort numerically,
+// not lexically, so "10" comes after "9".
+
+function sortMasterJournals(rows) {
+  return [...rows].sort((a, b) => {
+    const ta = a.tier == null || a.tier === "" ? Infinity : Number(a.tier);
+    const tb = b.tier == null || b.tier === "" ? Infinity : Number(b.tier);
+    const taSafe = Number.isFinite(ta) ? ta : Infinity;
+    const tbSafe = Number.isFinite(tb) ? tb : Infinity;
+    if (taSafe !== tbSafe) return taSafe - tbSafe;
+    const ja = (a.journal || "").toLowerCase();
+    const jb = (b.journal || "").toLowerCase();
+    return ja.localeCompare(jb);
+  });
+}
+
 // ─── Manage Journal List Panel ────────────────────────────────────────────────
 
 function ManageJournals({ masterJournals, setMasterJournals, onClose }) {
-  const [rows, setRows] = useState(() =>
-    masterJournals.map((j, i) => ({ ...j, _id: i }))
-  );
   const [filterText, setFilterText] = useState("");
-  const [saved, setSaved] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [highlightId, setHighlightId] = useState(null);
+  const [announcement, setAnnouncement] = useState("");
+  const [error, setError] = useState("");
 
-  function updateCell(id, field, value) {
-    setRows(prev => prev.map(r => r._id === id ? { ...r, [field]: value } : r));
-    setSaved(false);
+  // Always keep the displayed list sorted.
+  const sorted = useMemo(() => sortMasterJournals(masterJournals), [masterJournals]);
+
+  // Apply filter on top of the sorted view.
+  const filtered = useMemo(() => {
+    if (!filterText) return sorted;
+    const q = filterText.toLowerCase();
+    return sorted.filter(r =>
+      (r.journal || "").toLowerCase().includes(q) ||
+      (r.issn || "").toLowerCase().includes(q)
+    );
+  }, [sorted, filterText]);
+
+  const existingIssns = useMemo(
+    () => new Set(masterJournals.map(j => (j.issn || "").toLowerCase()).filter(Boolean)),
+    [masterJournals]
+  );
+
+  // Highlight a row briefly after an edit re-sorts it into a new position.
+  function flashRow(id) {
+    setHighlightId(id);
+    setTimeout(() => {
+      setHighlightId(curr => curr === id ? null : curr);
+    }, 1500);
   }
 
-  function addRow() {
-    const newId = Math.max(0, ...rows.map(r => r._id)) + 1;
-    setRows(prev => [...prev, { _id: newId, tier: "", journal: "", issn: "" }]);
-    setSaved(false);
-  }
+  // ─── DB operations ────────────────────────────────────────────────────────
 
-  function deleteRow(id) {
-    setRows(prev => prev.filter(r => r._id !== id));
-    setSaved(false);
-  }
+  async function handleCellEdit(row, columnKey, newValue) {
+    setError("");
+    const patch = {};
+    if (columnKey === "tier") patch.tier = newValue || null;
+    else if (columnKey === "journal") patch.journal = newValue ? newValue.trim() : "";
+    else if (columnKey === "issn") patch.issn = newValue ? newValue.trim() : null;
+    else return;
 
-  function handleSave() {
-    const clean = rows.map(({ _id, ...rest }) => rest).filter(r => r.journal && r.issn);
-    setMasterJournals(clean);
-    saveMasterJournals(clean);
-    setSaved(true);
-  }
+    // Optimistic update so the row appears edited and re-sorted immediately.
+    setMasterJournals(prev => prev.map(j => j.id === row.id ? { ...j, ...patch } : j));
+    // Start the highlight now (not after the round-trip) so the editor can
+    // see the row in its new sorted position while the change is in flight.
+    flashRow(row.id);
 
-  function handleReset() {
-    if (window.confirm("Reset to the original factory journal list? This cannot be undone.")) {
-      const reset = resetMasterJournals(JOURNALS);
-      setMasterJournals(reset);
-      setRows(reset.map((j, i) => ({ ...j, _id: i })));
-      setSaved(true);
+    try {
+      const updated = await updateMasterJournal(row.id, patch);
+      // Replace with the server's authoritative copy (handles trim/etc).
+      setMasterJournals(prev => prev.map(j => j.id === row.id ? { ...j, ...updated } : j));
+    } catch (err) {
+      // Roll back optimistic update.
+      setMasterJournals(prev => prev.map(j => j.id === row.id ? row : j));
+      setError(err.message || "Could not save change.");
     }
   }
 
-  const filtered = rows.filter(r =>
-    !filterText || r.journal?.toLowerCase().includes(filterText.toLowerCase()) || r.issn?.includes(filterText)
-  );
+  async function handleAddJournal({ tier, journal, issn }) {
+    setError("");
+    const created = await addMasterJournal({ tier, journal, issn });
+    setMasterJournals(prev => [...prev, created]);
+    setShowAddModal(false);
+    setAnnouncement(`Journal "${created.journal}" added.`);
+    flashRow(created.id);
+  }
 
-  const COLS = [
-    { key: "tier",    label: "Tier",    width: 60 },
-    { key: "journal", label: "Journal", width: 320 },
-    { key: "issn",    label: "ISSN",    width: 130 },
-  ];
+  async function handleDelete(row) {
+    setError("");
+    setConfirmDeleteId(null);
+    // Optimistic remove.
+    const previous = masterJournals;
+    setMasterJournals(prev => prev.filter(j => j.id !== row.id));
+    try {
+      await deleteMasterJournal(row.id);
+      setAnnouncement(`Journal "${row.journal}" removed.`);
+    } catch (err) {
+      setMasterJournals(previous);
+      setError(err.message || "Could not delete journal.");
+    }
+  }
+
+  // ─── Grid columns ─────────────────────────────────────────────────────────
+
+  const columns = useMemo(() => [
+    {
+      key: "tier",
+      label: "Tier",
+      width: "70px",
+      render: r => r.tier || "—",
+      editor: { kind: "select", options: [
+        { value: "1", label: "1" },
+        { value: "2", label: "2" },
+        { value: "3", label: "3" },
+      ] },
+    },
+    {
+      key: "journal",
+      label: "Journal",
+      width: "minmax(280px, 2.5fr)",
+      render: r => r.journal || "(no name)",
+      editor: { kind: "text" },
+    },
+    {
+      key: "issn",
+      label: "ISSN",
+      width: "140px",
+      render: r => r.issn || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "_delete",
+      label: "",
+      width: "60px",
+      render: () => (
+        <span aria-label="Delete journal" style={{
+          color: COLORS.danger,
+          width: "100%",
+          textAlign: "center",
+          fontSize: 16,
+        }}>✕</span>
+      ),
+      onActivate: (row) => setConfirmDeleteId(row.id),
+    },
+  ], []);
+
+  const rowToDelete = confirmDeleteId
+    ? masterJournals.find(j => j.id === confirmDeleteId)
+    : null;
 
   return (
-    <div style={{ background: "#2c1810", border: "1px solid #d4af7a", borderRadius: 10, padding: 24, marginBottom: 28, boxShadow: "0 4px 24px rgba(0,0,0,0.5)" }}>
+    <div style={{ ...styles.card, marginBottom: 28 }}>
+      {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
         <div>
-          <h3 style={{ color: "#d4af7a", margin: "0 0 4px", fontSize: 18, fontWeight: 400 }}>Manage Journal List</h3>
-          <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 13, margin: 0 }}>
-            Changes saved here will apply to all new installments. Existing jobs are unaffected.
+          <h3 style={{ ...styles.h3, marginBottom: 4 }}>Manage Journal List</h3>
+          <p style={{ color: COLORS.textMuted, fontSize: 13, margin: 0 }}>
+            Edits save automatically. The list is sorted by tier, then alphabetically by journal name.
+            Changes apply to all <em>new</em> installments — existing installments are unaffected.
           </p>
         </div>
-        <button onClick={onClose} style={{ background: "none", border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.5)", padding: "4px 12px", borderRadius: 4, cursor: "pointer", fontFamily: "Crimson Text, serif", fontSize: 13 }}>✕ Close</button>
+        <button onClick={onClose} style={styles.btnSubtle}>✕ Close</button>
       </div>
+
+      {/* Live-region announcements for screen readers */}
+      <div role="status" aria-live="polite" style={srOnly}>{announcement}</div>
+
+      {/* Error banner */}
+      {error && (
+        <div style={styles.banner("error")} role="alert">
+          {error}
+        </div>
+      )}
 
       {/* Toolbar */}
       <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center" }}>
-        <input placeholder="Filter journals or ISSN..." value={filterText} onChange={e => setFilterText(e.target.value)}
-          style={{ ...inputStyle, width: 260 }} />
-        <button onClick={addRow} style={btnOutline}>+ Add Row</button>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button onClick={handleReset} style={{ ...btnOutline, color: "#ff9800", borderColor: "#ff9800" }}>↺ Reset to Original</button>
-          <button onClick={handleSave} style={{ ...btnPrimary, background: saved ? "#2c6e49" : "#d4af7a" }}>
-            {saved ? "✓ Saved as Default" : "Save as Default"}
-          </button>
+        <input
+          placeholder="Filter by journal or ISSN…"
+          value={filterText}
+          onChange={e => setFilterText(e.target.value)}
+          style={{ ...styles.input, width: 280 }}
+          aria-label="Filter journal list"
+        />
+        <button onClick={() => setShowAddModal(true)} style={styles.btnOutline}>
+          + Add Journal
+        </button>
+        <div style={{ marginLeft: "auto", color: COLORS.textFaint, fontSize: 12 }}>
+          {masterJournals.length} journal{masterJournals.length === 1 ? "" : "s"}
+          {filterText && ` · ${filtered.length} shown`}
         </div>
       </div>
 
-      {/* Table */}
-      <div style={{ border: "1px solid #5a3a28", borderRadius: 8, overflow: "hidden" }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
-          <table style={{ borderCollapse: "collapse", width: "100%" }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
-              <tr style={{ background: "#1a0f0a" }}>
-                <th style={{ ...thStyle, width: 36 }}>#</th>
-                {COLS.map(c => <th key={c.key} style={{ ...thStyle, width: c.width }}>{c.label}</th>)}
-                <th style={{ ...thStyle, width: 40 }}>Del</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((row, idx) => (
-                <tr key={row._id} style={{ background: idx % 2 === 0 ? "#2c1810" : "#351e12", borderBottom: "1px solid #4a2c1a" }}>
-                  <td style={{ ...tdStyle, color: "#888", fontSize: 11, textAlign: "center" }}>{idx + 1}</td>
-                  {COLS.map(c => (
-                    <td key={c.key} style={tdStyle}>
-                      <input value={row[c.key] || ""} onChange={e => updateCell(row._id, c.key, e.target.value)}
-                        style={{ width: "100%", border: "none", background: "transparent", fontFamily: "Crimson Text, serif", fontSize: 13, color: "#fff", padding: "4px 6px", outline: "none" }}
-                        onFocus={e => e.target.style.background = "rgba(212,175,122,0.1)"}
-                        onBlur={e => e.target.style.background = "transparent"} />
-                    </td>
-                  ))}
-                  <td style={{ ...tdStyle, textAlign: "center" }}>
-                    <button onClick={() => deleteRow(row._id)} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}
-                      onMouseEnter={e => e.target.style.color = "#ff5252"}
-                      onMouseLeave={e => e.target.style.color = "#888"}>✕</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {/* Grid */}
+      <AccessibleGrid
+        ariaLabel="Master journal list"
+        columns={columns}
+        rows={filtered}
+        rowKey={r => r.id}
+        onEdit={handleCellEdit}
+        announce={msg => setAnnouncement(msg)}
+        highlightRow={highlightId}
+      />
+
+      <p style={{ color: COLORS.textFaint, fontSize: 12, marginTop: 10, marginBottom: 0 }}>
+        Press Enter or F2 in a cell to edit. Press Enter on the ✕ column to delete a row.
+      </p>
+
+      {/* Add modal */}
+      {showAddModal && (
+        <AddJournalModal
+          existingIssns={existingIssns}
+          onCancel={() => setShowAddModal(false)}
+          onSave={handleAddJournal}
+        />
+      )}
+
+      {/* Delete confirm */}
+      {rowToDelete && (
+        <ConfirmDeleteDialog
+          journal={rowToDelete}
+          onCancel={() => setConfirmDeleteId(null)}
+          onConfirm={() => handleDelete(rowToDelete)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmDeleteDialog({ journal, onCancel, onConfirm }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onCancel(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-delete-title"
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.65)",
+        display: "grid", placeItems: "center",
+        padding: 24, zIndex: 300,
+      }}
+    >
+      <div style={{
+        background: COLORS.bgPanel,
+        borderRadius: 10,
+        padding: "24px 28px",
+        maxWidth: 460,
+        width: "100%",
+        boxShadow: COLORS.shadowDeep,
+        border: `1px solid ${COLORS.borderSoft}`,
+      }}>
+        <h2 id="confirm-delete-title" style={{
+          fontFamily: FONTS.display,
+          fontSize: 20, fontWeight: 500,
+          margin: "0 0 8px", color: COLORS.gold,
+        }}>Remove journal?</h2>
+        <p style={{ color: COLORS.textBody, fontSize: 14, lineHeight: 1.5, margin: "0 0 18px" }}>
+          <strong style={{ color: COLORS.gold }}>{journal.journal}</strong> will be removed
+          from the master list. Existing installments are unaffected. This action cannot
+          be undone.
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onCancel} style={styles.btnOutline} autoFocus>Cancel</button>
+          <button onClick={onConfirm} style={styles.btnDanger}>Remove journal</button>
         </div>
-      </div>
-      <div style={{ marginTop: 8, color: "rgba(255,255,255,0.3)", fontSize: 12 }}>
-        {rows.length} journals · {filtered.length} shown · Journals without a Journal name or ISSN will be excluded when saving
       </div>
     </div>
   );
@@ -172,7 +345,11 @@ function ManageJournals({ masterJournals, setMasterJournals, onClose }) {
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
-export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJournals, setMasterJournals, onOpen }) {
+export default function Dashboard({
+  jobs, setJobs, addJob, removeJob,
+  masterJournals, setMasterJournals,
+  onOpen,
+}) {
   const [showNew, setShowNew] = useState(false);
   const [showManage, setShowManage] = useState(false);
   const [form, setForm] = useState({ name: "", installmentNumber: "", seasonYear: "" });
@@ -184,7 +361,12 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
     if (!form.installmentNumber || isNaN(parseInt(form.installmentNumber)))
       return setError("Please enter a valid installment number.");
     if (!form.seasonYear.trim()) return setError("Please enter a season/year (e.g. Fall 2024).");
-    const job = createJob(form.name.trim(), parseInt(form.installmentNumber), form.seasonYear.trim(), masterJournals);
+    const job = createJob(
+      form.name.trim(),
+      parseInt(form.installmentNumber),
+      form.seasonYear.trim(),
+      masterJournals,
+    );
     addJob(job);
     onOpen(job.id);
   }
@@ -196,24 +378,26 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "#1a0f0a", fontFamily: "Crimson Text, serif" }}>
+    <div style={{ minHeight: "100vh", background: COLORS.bgPage, fontFamily: FONTS.serif }}>
       {/* Hero */}
-      <div style={{ position: "relative", height: 340, overflow: "hidden" }}>
-        <img src="/hero.png" alt="PRAR" style={{ width: "100%", height: "100%", objectFit: "cover", filter: "brightness(0.65)" }} />
-        <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to bottom, rgba(26,15,10,0.2), rgba(26,15,10,0.85))", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", paddingBottom: 40 }}>
-          <div style={{ fontSize: 13, letterSpacing: 4, color: "#d4af7a", textTransform: "uppercase", marginBottom: 10, opacity: 0.8 }}>Periodic Review Tool</div>
-          <h1 style={{ fontSize: 42, color: "#fff", fontWeight: 400, margin: 0, textAlign: "center", letterSpacing: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)" }}>Peer-Reviewed Articles Review</h1>
-          <div style={{ width: 80, height: 2, background: "#d4af7a", margin: "16px auto 0" }} />
+      <div style={{ position: "relative", height: 320, overflow: "hidden" }}>
+        <img src="/hero.png" alt="" aria-hidden="true" style={{ width: "100%", height: "100%", objectFit: "cover", filter: "brightness(0.55) saturate(0.9)" }} />
+        <div style={{ position: "absolute", inset: 0, background: `linear-gradient(to bottom, rgba(24,18,14,0.35), ${COLORS.bgPage} 95%)`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", paddingBottom: 36 }}>
+          <div style={{ fontSize: 12, letterSpacing: 4, color: COLORS.gold, textTransform: "uppercase", marginBottom: 10, opacity: 0.85 }}>Periodic Review Tool</div>
+          <h1 style={{ fontSize: 40, color: COLORS.textBody, fontFamily: FONTS.display, fontWeight: 500, margin: 0, textAlign: "center", letterSpacing: 0.5, textShadow: "0 2px 16px rgba(0,0,0,0.65)" }}>
+            Peer-Reviewed Articles Review
+          </h1>
+          <div style={{ width: 80, height: 2, background: COLORS.gold, margin: "16px auto 0" }} />
         </div>
       </div>
 
       {/* Main content */}
-      <div style={{ maxWidth: 960, margin: "0 auto", padding: "40px 24px" }}>
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: "36px 24px 60px" }}>
         {/* Action bar */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
-          <h2 style={{ color: "#d4af7a", fontSize: 22, fontWeight: 400, margin: 0, letterSpacing: 0.5 }}>PRAR Installments</h2>
+          <h2 style={{ ...styles.h2, margin: 0 }}>PRAR Installments</h2>
           <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => importRef.current.click()} style={btnStyle("outline")}>Import Backup</button>
+            <button onClick={() => importRef.current.click()} style={styles.btnOutline}>Import Backup</button>
             <input ref={importRef} type="file" accept=".json" style={{ display: "none" }}
               onChange={e => {
                 const file = e.target.files[0];
@@ -221,14 +405,14 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
                 e.target.value = "";
               }} />
             <button onClick={() => setShowManage(s => !s)} style={{
-              ...btnStyle("outline"),
-              borderColor: showManage ? "#d4af7a" : "rgba(212,175,122,0.5)",
-              color: showManage ? "#d4af7a" : "rgba(212,175,122,0.6)",
+              ...styles.btnOutline,
+              borderColor: showManage ? COLORS.gold : COLORS.goldMuted,
+              color: showManage ? COLORS.gold : COLORS.goldMuted,
             }}>
               ⚙ Manage Journal List
             </button>
             <button onClick={() => { setShowNew(true); setError(""); setForm({ name: "", installmentNumber: "", seasonYear: "" }); }}
-              style={btnStyle("primary")}>
+              style={styles.btnPrimary}>
               + New PRAR Installment
             </button>
           </div>
@@ -245,38 +429,38 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
 
         {/* New job form */}
         {showNew && (
-          <div style={{ background: "#2c1810", border: "1px solid #5a3a28", borderRadius: 10, padding: 28, marginBottom: 28, boxShadow: "0 4px 24px rgba(0,0,0,0.5)" }}>
-            <h3 style={{ color: "#d4af7a", margin: "0 0 20px", fontSize: 18, fontWeight: 400 }}>New PRAR Installment</h3>
+          <div style={{ ...styles.card, marginBottom: 28 }}>
+            <h3 style={styles.h3}>New PRAR Installment</h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
               <div>
-                <label style={labelStyle}>Installment Name</label>
-                <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. PRAR Installment 27" style={inputStyle} />
+                <label htmlFor="new-name" style={styles.label}>Installment Name</label>
+                <input id="new-name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. PRAR Installment 27" style={styles.input} />
               </div>
               <div>
-                <label style={labelStyle}>Installment Number</label>
-                <input value={form.installmentNumber} onChange={e => setForm(f => ({ ...f, installmentNumber: e.target.value }))} placeholder="e.g. 27" type="number" min="1" style={inputStyle} />
+                <label htmlFor="new-number" style={styles.label}>Installment Number</label>
+                <input id="new-number" value={form.installmentNumber} onChange={e => setForm(f => ({ ...f, installmentNumber: e.target.value }))} placeholder="e.g. 27" type="number" min="1" style={styles.input} />
               </div>
               <div>
-                <label style={labelStyle}>Season / Year</label>
-                <input value={form.seasonYear} onChange={e => setForm(f => ({ ...f, seasonYear: e.target.value }))} placeholder="e.g. Fall 2024" style={inputStyle} />
+                <label htmlFor="new-season" style={styles.label}>Season / Year</label>
+                <input id="new-season" value={form.seasonYear} onChange={e => setForm(f => ({ ...f, seasonYear: e.target.value }))} placeholder="e.g. Fall 2024" style={styles.input} />
               </div>
             </div>
             {form.installmentNumber && ORDINALS[parseInt(form.installmentNumber)] && (
-              <div style={{ color: "rgba(212,175,122,0.7)", fontSize: 13, marginBottom: 12 }}>
+              <div style={{ color: COLORS.goldMuted, fontSize: 13, marginBottom: 12 }}>
                 Preview intro word: "<em>{ORDINALS[parseInt(form.installmentNumber)]}</em>" · Using master list with {masterJournals.length} journals
               </div>
             )}
-            {error && <div style={{ color: "#ff7c7c", fontSize: 13, marginBottom: 12 }}>{error}</div>}
+            {error && <div style={styles.banner("error")} role="alert">{error}</div>}
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={handleCreate} style={btnStyle("primary")}>Create & Open</button>
-              <button onClick={() => setShowNew(false)} style={btnStyle("outline")}>Cancel</button>
+              <button onClick={handleCreate} style={styles.btnPrimary}>Create & Open</button>
+              <button onClick={() => setShowNew(false)} style={styles.btnOutline}>Cancel</button>
             </div>
           </div>
         )}
 
         {/* Job list */}
         {jobs.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "60px 0", color: "rgba(255,255,255,0.3)", fontSize: 16 }}>
+          <div style={{ textAlign: "center", padding: "60px 0", color: COLORS.textFaint, fontSize: 16 }}>
             No installments yet. Create your first PRAR Installment to get started.
           </div>
         ) : (
@@ -286,13 +470,18 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
               const reviewedCount = job.articles?.filter(a => a.status && a.status !== "pending").length || 0;
               const reviewPct = articleCount > 0 ? Math.round((reviewedCount / articleCount) * 100) : 0;
               return (
-                <div key={job.id} style={{ background: "#2c1810", border: "1px solid #5a3a28", borderRadius: 10, padding: "18px 22px", transition: "border-color 0.2s" }}
-                  onMouseEnter={e => e.currentTarget.style.borderColor = "#d4af7a"}
-                  onMouseLeave={e => e.currentTarget.style.borderColor = "#5a3a28"}>
+                <div key={job.id} style={{
+                  ...styles.card,
+                  marginBottom: 0,
+                  padding: "18px 22px",
+                  transition: "border-color 0.2s, box-shadow 0.2s",
+                }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.gold; e.currentTarget.style.boxShadow = COLORS.shadowHover; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.borderSoft; e.currentTarget.style.boxShadow = COLORS.shadowSoft; }}>
                   <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 6 }}>
                     <div>
-                      <div style={{ color: "#fff", fontSize: 17, fontWeight: 400, marginBottom: 4 }}>{job.name}</div>
-                      <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>
+                      <div style={{ color: COLORS.textBody, fontSize: 17, fontWeight: 500, marginBottom: 4 }}>{job.name}</div>
+                      <div style={{ color: COLORS.textMuted, fontSize: 13 }}>
                         {job.seasonYear} · Installment #{job.installmentNumber}
                         {articleCount > 0 && ` · ${articleCount} articles`}
                         {job.stage >= 2 && articleCount > 0 && ` · ${reviewPct}% reviewed`}
@@ -300,9 +489,9 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: 8, flexShrink: 0, marginLeft: 16 }}>
-                      <button onClick={() => exportJob(job)} style={btnStyle("outline", true)}>Export</button>
-                      <button onClick={() => handleDelete(job.id, job.name)} style={btnStyle("danger", true)}>Delete</button>
-                      <button onClick={() => onOpen(job.id)} style={btnStyle("primary", true)}>Open →</button>
+                      <button onClick={() => exportJob(job)} style={btnSmall(styles.btnOutline)}>Export</button>
+                      <button onClick={() => handleDelete(job.id, job.name)} style={btnSmall(styles.btnDanger)}>Delete</button>
+                      <button onClick={() => onOpen(job.id)} style={btnSmall(styles.btnPrimary)}>Open →</button>
                     </div>
                   </div>
                   <ProgressBar currentStage={job.stage || 1} />
@@ -316,16 +505,16 @@ export default function Dashboard({ jobs, setJobs, addJob, removeJob, masterJour
   );
 }
 
-function btnStyle(type, small = false) {
-  const base = { fontFamily: "Crimson Text, serif", fontSize: small ? 13 : 14, padding: small ? "4px 14px" : "8px 20px", borderRadius: 5, cursor: "pointer", transition: "all 0.15s" };
-  if (type === "primary") return { ...base, background: "#d4af7a", color: "#2c1810", border: "none", fontWeight: 600 };
-  if (type === "outline") return { ...base, background: "transparent", color: "#d4af7a", border: "1px solid #d4af7a" };
-  if (type === "danger") return { ...base, background: "transparent", color: "#ff7c7c", border: "1px solid #ff7c7c" };
+// Helper: small variants of the standard buttons for the per-card actions.
+function btnSmall(base) {
+  return { ...base, fontSize: 12, padding: "4px 12px" };
 }
 
-const labelStyle = { display: "block", color: "rgba(212,175,122,0.7)", fontSize: 12, marginBottom: 6, letterSpacing: 0.5 };
-const inputStyle = { width: "100%", padding: "8px 12px", background: "#1a0f0a", border: "1px solid #5a3a28", borderRadius: 5, color: "#fff", fontFamily: "Crimson Text, serif", fontSize: 14, boxSizing: "border-box" };
-const btnOutline = { background: "transparent", color: "#d4af7a", border: "1px solid #d4af7a", padding: "7px 16px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 13, cursor: "pointer" };
-const btnPrimary = { background: "#d4af7a", color: "#2c1810", border: "none", padding: "8px 20px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 14, cursor: "pointer", fontWeight: 600 };
-const thStyle = { padding: "10px 8px", color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 12, fontWeight: 600, textAlign: "left", letterSpacing: 0.5, borderRight: "1px solid #2a1208", background: "#1a0f0a" };
-const tdStyle = { padding: "4px 6px", verticalAlign: "middle", borderRight: "1px solid #4a2c1a", fontFamily: "Crimson Text, serif" };
+// Screen-reader-only utility style. Used for live region announcements.
+const srOnly = {
+  position: "absolute",
+  width: 1, height: 1,
+  padding: 0, margin: -1, overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap", border: 0,
+};
