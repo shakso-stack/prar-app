@@ -1,21 +1,17 @@
 /**
- * PRAR Store
- * Primary storage: Supabase (shared across all users/devices)
- * Fallback: localStorage (if Supabase env vars not set)
+ * PRAR Store — legacy installment storage.
  *
- * Supabase table required:
- *   Table name: prar_jobs
- *   Columns:
- *     id          text  primary key
- *     data        jsonb
- *     created_at  timestamptz default now()
- *     updated_at  timestamptz default now()
+ * NOTE: Master journals are now loaded from prar.master_journals via
+ * src/lib/db.js (see App.jsx). The localStorage-backed master journal
+ * helpers below (loadMasterJournalsAsync, saveMasterJournalsAsync,
+ * loadMasterJournals, saveMasterJournals, resetMasterJournals) are no
+ * longer called from App.jsx but kept here to avoid breaking other
+ * imports during the migration. They will be deleted in A8 once all
+ * stages are migrated.
  *
- * Supabase table required:
- *   Table name: prar_settings
- *   Columns:
- *     key         text  primary key
- *     value       jsonb
+ * Primary storage for installments: Supabase prar_jobs table (legacy
+ * blob format) with localStorage fallback. This will be replaced in
+ * A4 by per-row reads/writes against prar.installments etc.
  */
 
 import { supabase, supabaseReady } from "./supabase";
@@ -89,7 +85,7 @@ export async function deleteJobAsync(jobId) {
   }
 }
 
-// ─── Master journals ──────────────────────────────────────────────────────────
+// ─── Master journals (legacy — no longer called from App.jsx, kept until A8) ──
 
 export async function loadMasterJournalsAsync(defaultJournals) {
   if (supabaseReady) {
@@ -101,7 +97,6 @@ export async function loadMasterJournalsAsync(defaultJournals) {
     if (error || !data) return defaultJournals;
     return data.value;
   }
-  // localStorage fallback
   try {
     const raw = localStorage.getItem(LS_JOURNALS_KEY);
     return raw ? JSON.parse(raw) : defaultJournals;
@@ -118,11 +113,8 @@ export async function saveMasterJournalsAsync(journals) {
     if (error) console.error("Supabase saveMasterJournals error:", error);
     return;
   }
-  // localStorage fallback
   localStorage.setItem(LS_JOURNALS_KEY, JSON.stringify(journals));
 }
-
-// ─── Synchronous helpers (kept for non-async contexts) ────────────────────────
 
 export function loadMasterJournals(defaultJournals) {
   try {
@@ -144,6 +136,11 @@ export function resetMasterJournals(defaultJournals) {
 
 // ─── Job helpers ──────────────────────────────────────────────────────────────
 
+// createJob — masterJournals now arrives in DB shape (objects with id, tier,
+// journal, issn, position). We map them into the legacy journalIssues shape
+// expected by Stage 1: integer id, plus blank volume/issue/year. We must NOT
+// spread the DB row directly, because its UUID `id` would override the
+// integer id used by Stage 1's filtering/dedupe logic.
 export function createJob(name, installmentNumber, seasonYear, masterJournals) {
   return {
     id: Date.now().toString(),
@@ -154,7 +151,13 @@ export function createJob(name, installmentNumber, seasonYear, masterJournals) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     journalIssues: masterJournals.map((j, i) => ({
-      id: i + 1, ...j, volume: "", issue: "", year: "",
+      id: i + 1,
+      tier: j.tier,
+      journal: j.journal,
+      issn: j.issn,
+      volume: "",
+      issue: "",
+      year: "",
     })),
     articles: [],
   };
