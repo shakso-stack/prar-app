@@ -8,57 +8,48 @@ import Stage5 from "./components/Stage5";
 import SignIn from "./components/SignIn";
 import {
   loadJobsAsync, saveJobAsync, deleteJobAsync,
-  loadMasterJournalsAsync, saveMasterJournalsAsync,
-  updateJob, deleteJob, loadMasterJournals, saveMasterJournals,
+  updateJob, deleteJob,
 } from "./store";
-import { JOURNALS } from "./data";
+import { listMasterJournals } from "./lib/db";
 import { useAuth, signOut } from "./lib/auth";
+import { COLORS, FONTS } from "./lib/styles";
 
 export default function App() {
   const { session, user, loading: authLoading } = useAuth();
 
-  // ─── Sign-in gate ──────────────────────────────────────────────────────
-  // Until A2–A8 migrate the rest of the app to the new schema, the
-  // existing localStorage/legacy-supabase flow continues to power the
-  // dashboard and stages. Auth only gates whether the user sees them.
-
-  if (authLoading) {
-    return <FullScreenLoader message="Loading…" />;
-  }
-
-  if (!session) {
-    return <SignIn />;
-  }
+  if (authLoading) return <FullScreenLoader message="Loading…" />;
+  if (!session)   return <SignIn />;
 
   return <AuthenticatedApp user={user} />;
 }
 
 function AuthenticatedApp({ user }) {
   const [jobs, setJobs] = useState([]);
-  const [masterJournals, setMasterJournals] = useState(() => loadMasterJournals(JOURNALS));
+  const [masterJournals, setMasterJournals] = useState([]);
   const [activeJobId, setActiveJobId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
-  // Load jobs and master journals on mount
+  // Load jobs (still legacy) and master journals (DB) on mount.
   useEffect(() => {
     async function init() {
       setLoading(true);
-      const [loadedJobs, loadedJournals] = await Promise.all([
-        loadJobsAsync(),
-        loadMasterJournalsAsync(JOURNALS),
-      ]);
-      setJobs(loadedJobs);
-      setMasterJournals(loadedJournals);
-      setLoading(false);
+      setLoadError("");
+      try {
+        const [loadedJobs, loadedJournals] = await Promise.all([
+          loadJobsAsync(),
+          listMasterJournals(),
+        ]);
+        setJobs(loadedJobs);
+        setMasterJournals(loadedJournals);
+      } catch (err) {
+        setLoadError(err.message || "Could not load data.");
+      } finally {
+        setLoading(false);
+      }
     }
     init();
   }, []);
-
-  // Save master journals whenever they change
-  useEffect(() => {
-    saveMasterJournalsAsync(masterJournals);
-    saveMasterJournals(masterJournals); // keep localStorage in sync as backup
-  }, [masterJournals]);
 
   const activeJob = jobs.find((j) => j.id === activeJobId) || null;
 
@@ -93,21 +84,42 @@ function AuthenticatedApp({ user }) {
     updateActiveJob({ stage });
   }
 
-  if (loading) {
-    return <FullScreenLoader message="Loading installments…" />;
+  if (loading) return <FullScreenLoader message="Loading installments…" />;
+
+  if (loadError) {
+    return (
+      <div style={{
+        minHeight: "100vh", background: COLORS.bgPage,
+        display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", gap: 16, padding: 24,
+        fontFamily: FONTS.serif,
+      }}>
+        <div style={{ color: COLORS.danger, fontSize: 16, maxWidth: 480, textAlign: "center" }}>
+          {loadError}
+        </div>
+        <button onClick={() => window.location.reload()} style={{
+          background: COLORS.gold, color: COLORS.textOnGold,
+          border: "none", padding: "9px 22px", borderRadius: 5,
+          fontFamily: FONTS.serif, fontSize: 14, fontWeight: 700, cursor: "pointer",
+        }}>Reload</button>
+      </div>
+    );
   }
 
   if (!activeJob) {
     return (
-      <Dashboard
-        jobs={jobs}
-        setJobs={handleSetJobs}
-        addJob={addJob}
-        removeJob={removeJob}
-        masterJournals={masterJournals}
-        setMasterJournals={setMasterJournals}
-        onOpen={(id) => setActiveJobId(id)}
-      />
+      <>
+        <TopBar user={user} onSignOut={signOut} />
+        <Dashboard
+          jobs={jobs}
+          setJobs={handleSetJobs}
+          addJob={addJob}
+          removeJob={removeJob}
+          masterJournals={masterJournals}
+          setMasterJournals={setMasterJournals}
+          onOpen={(id) => setActiveJobId(id)}
+        />
+      </>
     );
   }
 
@@ -142,7 +154,7 @@ function FullScreenLoader({ message }) {
       role="status"
       aria-live="polite"
       style={{
-        minHeight: "100vh", background: "#1a0f0a",
+        minHeight: "100vh", background: COLORS.bgPage,
         display: "flex", flexDirection: "column",
         alignItems: "center", justifyContent: "center", gap: 16,
       }}
@@ -150,15 +162,38 @@ function FullScreenLoader({ message }) {
       <div
         aria-hidden="true"
         style={{
-          width: 48, height: 48,
-          border: "3px solid #d4af7a", borderTopColor: "transparent",
+          width: 44, height: 44,
+          border: `3px solid ${COLORS.gold}`, borderTopColor: "transparent",
           borderRadius: "50%", animation: "spin 0.8s linear infinite",
         }}
       />
-      <div style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 16 }}>
+      <div style={{ color: COLORS.gold, fontFamily: FONTS.serif, fontSize: 15 }}>
         {message}
       </div>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+// Top bar on the dashboard. The original UI had no top bar there — the sign-out
+// only appeared inside StageNav. Adding a minimal one so users can sign out from
+// the dashboard too.
+function TopBar({ user, onSignOut }) {
+  return (
+    <div style={{
+      background: COLORS.bgPanel, padding: "8px 24px",
+      display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 14,
+      borderBottom: `1px solid ${COLORS.borderSoft}`,
+      fontFamily: FONTS.serif,
+    }}>
+      <span style={{ color: COLORS.textMuted, fontSize: 12 }}>{user?.email}</span>
+      <button onClick={onSignOut} style={{
+        background: "none",
+        border: `1px solid ${COLORS.goldMuted}`,
+        color: COLORS.gold,
+        padding: "4px 12px", borderRadius: 4,
+        cursor: "pointer", fontFamily: FONTS.serif, fontSize: 12,
+      }}>Sign out</button>
     </div>
   );
 }
@@ -169,9 +204,15 @@ function StageNav({ job, goToStage, onBack, user, onSignOut }) {
     { n: 4, label: "Generate" }, { n: 5, label: "Download" },
   ];
   return (
-    <div style={{ background: "#2c1810", padding: "10px 24px", display: "flex", alignItems: "center", gap: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.3)", position: "sticky", top: 0, zIndex: 100 }}>
+    <div style={{
+      background: COLORS.bgPanel, padding: "10px 24px",
+      display: "flex", alignItems: "center", gap: 16,
+      boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+      position: "sticky", top: 0, zIndex: 100,
+      borderBottom: `1px solid ${COLORS.borderSoft}`,
+    }}>
       <button onClick={onBack} style={navBtn}>← Dashboard</button>
-      <span style={{ color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 14, marginRight: 8 }}>{job.name}</span>
+      <span style={{ color: COLORS.gold, fontFamily: FONTS.serif, fontSize: 14, marginRight: 8 }}>{job.name}</span>
       <div style={{ display: "flex", gap: 4, flex: 1 }}>
         {stages.map(({ n, label }) => {
           const done = job.stage > n;
@@ -180,11 +221,11 @@ function StageNav({ job, goToStage, onBack, user, onSignOut }) {
           return (
             <button key={n} onClick={() => reachable && goToStage(n)} style={{
               padding: "4px 14px", borderRadius: 4, fontSize: 12,
-              fontFamily: "Crimson Text, serif", cursor: reachable ? "pointer" : "default",
-              border: active ? "1px solid #d4af7a" : "1px solid rgba(255,255,255,0.15)",
-              background: active ? "#d4af7a" : done ? "rgba(212,175,122,0.2)" : "transparent",
-              color: active ? "#2c1810" : done ? "#d4af7a" : "rgba(255,255,255,0.4)",
-              fontWeight: active ? 600 : 400,
+              fontFamily: FONTS.serif, cursor: reachable ? "pointer" : "default",
+              border: active ? `1px solid ${COLORS.gold}` : `1px solid ${COLORS.borderHair}`,
+              background: active ? COLORS.gold : done ? COLORS.goldSoft : "transparent",
+              color: active ? COLORS.textOnGold : done ? COLORS.gold : COLORS.textFaint,
+              fontWeight: active ? 700 : 400,
             }}>
               {done ? "✓ " : ""}{n}. {label}
             </button>
@@ -199,7 +240,7 @@ function StageNav({ job, goToStage, onBack, user, onSignOut }) {
 function UserMenu({ user, onSignOut }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
-      <span style={{ color: "rgba(212,175,122,0.7)", fontFamily: "Crimson Text, serif", fontSize: 12 }}>
+      <span style={{ color: COLORS.goldMuted, fontFamily: FONTS.serif, fontSize: 12 }}>
         {user?.email}
       </span>
       <button onClick={onSignOut} style={navBtn}>Sign out</button>
@@ -209,11 +250,11 @@ function UserMenu({ user, onSignOut }) {
 
 const navBtn = {
   background: "none",
-  border: "1px solid rgba(255,255,255,0.3)",
-  color: "#d4af7a",
+  border: `1px solid ${COLORS.goldMuted}`,
+  color: COLORS.gold,
   padding: "4px 12px",
   borderRadius: 4,
   cursor: "pointer",
-  fontFamily: "Crimson Text, serif",
+  fontFamily: FONTS.serif,
   fontSize: 13,
 };
