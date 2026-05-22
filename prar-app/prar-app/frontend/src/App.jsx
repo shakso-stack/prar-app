@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Dashboard from "./components/Dashboard";
 import Stage1 from "./components/Stage1";
 import Stage2 from "./components/Stage2";
@@ -7,10 +7,8 @@ import Stage4 from "./components/Stage4";
 import Stage5 from "./components/Stage5";
 import SignIn from "./components/SignIn";
 import {
-  loadJobsAsync, saveJobAsync, deleteJobAsync,
-  updateJob, deleteJob,
-} from "./store";
-import { listMasterJournals } from "./lib/db";
+  listInstallments, listMasterJournals, getInstallment, updateInstallment,
+} from "./lib/db";
 import { useAuth, signOut } from "./lib/auth";
 import { COLORS, FONTS } from "./lib/styles";
 
@@ -24,24 +22,25 @@ export default function App() {
 }
 
 function AuthenticatedApp({ user }) {
-  const [jobs, setJobs] = useState([]);
+  const [installments, setInstallments] = useState([]);
   const [masterJournals, setMasterJournals] = useState([]);
-  const [activeJobId, setActiveJobId] = useState(null);
+  const [activeInstallmentId, setActiveInstallmentId] = useState(null);
+  const [activeInstallment, setActiveInstallment] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
-  // Load jobs (still legacy) and master journals (DB) on mount.
+  // Initial load: installment list + master journals.
   useEffect(() => {
     async function init() {
       setLoading(true);
       setLoadError("");
       try {
-        const [loadedJobs, loadedJournals] = await Promise.all([
-          loadJobsAsync(),
+        const [insts, journals] = await Promise.all([
+          listInstallments(),
           listMasterJournals(),
         ]);
-        setJobs(loadedJobs);
-        setMasterJournals(loadedJournals);
+        setInstallments(insts);
+        setMasterJournals(journals);
       } catch (err) {
         setLoadError(err.message || "Could not load data.");
       } finally {
@@ -51,38 +50,71 @@ function AuthenticatedApp({ user }) {
     init();
   }, []);
 
-  const activeJob = jobs.find((j) => j.id === activeJobId) || null;
-
-  async function handleSetJobs(nextJobs) {
-    if (Array.isArray(nextJobs)) {
-      if (nextJobs.length < jobs.length) {
-        const removedId = jobs.find(j => !nextJobs.find(nj => nj.id === j.id))?.id;
-        if (removedId) await deleteJobAsync(removedId);
-      }
-      setJobs(nextJobs);
+  // When an installment is opened, fetch its full row (so we have the
+  // current stage + intro_override). The stage components themselves
+  // fetch their own per-stage data.
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeInstallmentId) {
+      setActiveInstallment(null);
+      return;
     }
+    async function loadActive() {
+      try {
+        const inst = await getInstallment(activeInstallmentId);
+        if (!cancelled) setActiveInstallment(inst);
+      } catch (err) {
+        if (!cancelled) setLoadError(err.message || "Could not load installment.");
+      }
+    }
+    loadActive();
+    return () => { cancelled = true; };
+  }, [activeInstallmentId]);
+
+  // Called by stage components when they change the installment's
+  // current stage (e.g. Stage 1 proceeding to Stage 2). Writes through to
+  // the DB and updates both activeInstallment and the dashboard list.
+  const setStage = useCallback(async (stage) => {
+    if (!activeInstallment) return;
+    const updated = await updateInstallment(activeInstallment.id, { stage });
+    setActiveInstallment(updated);
+    setInstallments(prev => prev.map(i => i.id === updated.id ? { ...i, ...updated } : i));
+  }, [activeInstallment]);
+
+  // Called by Stage 4 when the intro override changes.
+  const setIntroOverride = useCallback(async (intro_override) => {
+    if (!activeInstallment) return;
+    const updated = await updateInstallment(activeInstallment.id, { intro_override });
+    setActiveInstallment(updated);
+    setInstallments(prev => prev.map(i => i.id === updated.id ? { ...i, ...updated } : i));
+  }, [activeInstallment]);
+
+  // Called by stage components when something happens that should bump the
+  // installment's updated_at (e.g. articles got fetched). Writing any field
+  // works — we use stage since it's idempotent.
+  const touchInstallment = useCallback(async () => {
+    if (!activeInstallment) return;
+    const updated = await updateInstallment(activeInstallment.id, { stage: activeInstallment.stage });
+    setActiveInstallment(updated);
+    setInstallments(prev => prev.map(i => i.id === updated.id ? { ...i, ...updated } : i));
+  }, [activeInstallment]);
+
+  // Called by Dashboard after it creates a new installment.
+  function handleInstallmentCreated(inst) {
+    setInstallments(prev => [inst, ...prev]);
+    setActiveInstallmentId(inst.id);
   }
 
-  async function addJob(job) {
-    await saveJobAsync(job);
-    setJobs(prev => [job, ...prev]);
+  function handleInstallmentDeleted(id) {
+    setInstallments(prev => prev.filter(i => i.id !== id));
+    if (activeInstallmentId === id) setActiveInstallmentId(null);
   }
 
-  async function updateActiveJob(updates) {
-    const updatedJobs = updateJob(jobs, activeJobId, updates);
-    setJobs(updatedJobs);
-    const updatedJob = updatedJobs.find(j => j.id === activeJobId);
-    if (updatedJob) await saveJobAsync(updatedJob);
+  function closeInstallment() {
+    setActiveInstallmentId(null);
   }
 
-  async function removeJob(jobId) {
-    await deleteJobAsync(jobId);
-    setJobs(prev => deleteJob(prev, jobId));
-  }
-
-  function goToStage(stage) {
-    updateActiveJob({ stage });
-  }
+  function goToStage(stage) { setStage(stage); }
 
   if (loading) return <FullScreenLoader message="Loading installments…" />;
 
@@ -106,44 +138,52 @@ function AuthenticatedApp({ user }) {
     );
   }
 
-  if (!activeJob) {
+  // Dashboard view (no active installment).
+  if (!activeInstallmentId) {
     return (
       <>
         <TopBar user={user} onSignOut={signOut} />
         <Dashboard
-          jobs={jobs}
-          setJobs={handleSetJobs}
-          addJob={addJob}
-          removeJob={removeJob}
+          installments={installments}
+          setInstallments={setInstallments}
           masterJournals={masterJournals}
           setMasterJournals={setMasterJournals}
-          onOpen={(id) => setActiveJobId(id)}
+          userId={user?.id || null}
+          onCreated={handleInstallmentCreated}
+          onDeleted={handleInstallmentDeleted}
+          onOpen={(id) => setActiveInstallmentId(id)}
         />
       </>
     );
   }
 
+  // Stage view — but we may not have loaded activeInstallment yet.
+  if (!activeInstallment) {
+    return <FullScreenLoader message="Loading installment…" />;
+  }
+
   const stageProps = {
-    job: activeJob,
-    updateJob: updateActiveJob,
+    installment: activeInstallment,
+    setIntroOverride,
+    touchInstallment,
     goToStage,
-    onBack: () => setActiveJobId(null),
+    onBack: closeInstallment,
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f8f6f1" }}>
+    <div style={{ minHeight: "100vh", background: COLORS.bgPage }}>
       <StageNav
-        job={activeJob}
+        installment={activeInstallment}
         goToStage={goToStage}
-        onBack={() => setActiveJobId(null)}
+        onBack={closeInstallment}
         user={user}
         onSignOut={signOut}
       />
-      {activeJob.stage === 1 && <Stage1 {...stageProps} />}
-      {activeJob.stage === 2 && <Stage2 {...stageProps} />}
-      {activeJob.stage === 3 && <Stage3 {...stageProps} />}
-      {activeJob.stage === 4 && <Stage4 {...stageProps} />}
-      {activeJob.stage === 5 && <Stage5 {...stageProps} />}
+      {activeInstallment.stage === 1 && <Stage1 {...stageProps} />}
+      {activeInstallment.stage === 2 && <Stage2 {...stageProps} />}
+      {activeInstallment.stage === 3 && <Stage3 {...stageProps} />}
+      {activeInstallment.stage === 4 && <Stage4 {...stageProps} />}
+      {activeInstallment.stage === 5 && <Stage5 {...stageProps} />}
     </div>
   );
 }
@@ -175,9 +215,6 @@ function FullScreenLoader({ message }) {
   );
 }
 
-// Top bar on the dashboard. The original UI had no top bar there — the sign-out
-// only appeared inside StageNav. Adding a minimal one so users can sign out from
-// the dashboard too.
 function TopBar({ user, onSignOut }) {
   return (
     <div style={{
@@ -198,7 +235,7 @@ function TopBar({ user, onSignOut }) {
   );
 }
 
-function StageNav({ job, goToStage, onBack, user, onSignOut }) {
+function StageNav({ installment, goToStage, onBack, user, onSignOut }) {
   const stages = [
     { n: 1, label: "Fetch" }, { n: 2, label: "Review" }, { n: 3, label: "Compile" },
     { n: 4, label: "Generate" }, { n: 5, label: "Download" },
@@ -212,12 +249,12 @@ function StageNav({ job, goToStage, onBack, user, onSignOut }) {
       borderBottom: `1px solid ${COLORS.borderSoft}`,
     }}>
       <button onClick={onBack} style={navBtn}>← Dashboard</button>
-      <span style={{ color: COLORS.gold, fontFamily: FONTS.serif, fontSize: 14, marginRight: 8 }}>{job.name}</span>
+      <span style={{ color: COLORS.gold, fontFamily: FONTS.serif, fontSize: 14, marginRight: 8 }}>{installment.name}</span>
       <div style={{ display: "flex", gap: 4, flex: 1 }}>
         {stages.map(({ n, label }) => {
-          const done = job.stage > n;
-          const active = job.stage === n;
-          const reachable = n <= job.stage;
+          const done = installment.stage > n;
+          const active = installment.stage === n;
+          const reachable = n <= installment.stage;
           return (
             <button key={n} onClick={() => reachable && goToStage(n)} style={{
               padding: "4px 14px", borderRadius: 4, fontSize: 12,
