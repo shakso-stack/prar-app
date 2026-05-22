@@ -24,7 +24,6 @@ export async function listMasterJournals() {
 }
 
 export async function addMasterJournal({ tier, journal, issn }) {
-  // New journals go to the end of the list.
   const { data: maxRow } = await supabase
     .from("master_journals")
     .select("position")
@@ -60,17 +59,11 @@ export async function deleteMasterJournal(id) {
   if (error) throw error;
 }
 
-// Replace the entire master_journals list in one operation. Used by the
-// dashboard's Manage Journal List panel's "Save as Default" button when
-// the editor has made many row-level changes locally and wants to commit
-// them all at once. Implemented as: delete-all, then bulk insert with
-// fresh positions.
 export async function replaceAllMasterJournals(rows) {
-  // First clear. RLS lets authenticated users do this.
   const { error: delErr } = await supabase
     .from("master_journals")
     .delete()
-    .neq("id", "00000000-0000-0000-0000-000000000000"); // delete every row
+    .neq("id", "00000000-0000-0000-0000-000000000000");
   if (delErr) throw delErr;
 
   if (rows.length === 0) return [];
@@ -110,8 +103,32 @@ export async function getInstallment(id) {
   return data;
 }
 
+// Returns a map of { [installment_id]: { total, reviewed, approved } }.
+// Used by the dashboard list to render per-installment progress.
+//
+// We pull the articles table once and group client-side. RLS lets the
+// authenticated user see all rows, which matches the "any editor can see
+// any installment" model in Bouquets.
+export async function getInstallmentStatsMap() {
+  const { data, error } = await supabase
+    .from("articles")
+    .select("installment_id, status");
+  if (error) throw error;
+  const out = {};
+  for (const row of data) {
+    if (!out[row.installment_id]) out[row.installment_id] = { total: 0, reviewed: 0, approved: 0 };
+    const s = out[row.installment_id];
+    s.total++;
+    if (row.status && row.status !== "pending") s.reviewed++;
+    if (row.status === "approved" || row.status === "auto-approved") s.approved++;
+  }
+  return out;
+}
+
 // Creates an installment row AND seeds its per-installment journal_issues
-// from the current master_journals list. Returns the created installment.
+// from the current master_journals list. Seed order matches the dashboard's
+// (tier, journal) sort, so Stage 1 Phase 1 shows journals in the familiar
+// order rather than the raw `position` order.
 export async function createInstallment({ name, installmentNumber, seasonYear, userId }) {
   const { data: inst, error: instErr } = await supabase
     .from("installments")
@@ -125,10 +142,18 @@ export async function createInstallment({ name, installmentNumber, seasonYear, u
     .single();
   if (instErr) throw instErr;
 
-  // Seed journal_issues from current master_journals.
+  // Seed journal_issues from current master_journals, sorted (tier, journal).
   const masters = await listMasterJournals();
   if (masters.length > 0) {
-    const seed = masters.map((m, i) => ({
+    const sorted = [...masters].sort((a, b) => {
+      const ta = a.tier == null || a.tier === "" ? Infinity : Number(a.tier);
+      const tb = b.tier == null || b.tier === "" ? Infinity : Number(b.tier);
+      const taSafe = Number.isFinite(ta) ? ta : Infinity;
+      const tbSafe = Number.isFinite(tb) ? tb : Infinity;
+      if (taSafe !== tbSafe) return taSafe - tbSafe;
+      return (a.journal || "").toLowerCase().localeCompare((b.journal || "").toLowerCase());
+    });
+    const seed = sorted.map((m, i) => ({
       installment_id: inst.id,
       tier: m.tier,
       journal: m.journal,
@@ -225,10 +250,9 @@ export async function deleteJournalIssue(id) {
 export async function listArticles(installmentId) {
   const { data, error } = await supabase
     .from("articles")
-    .select("id, installment_id, journal_issue_id, author, title, journal, volume, issue, year, tier, abstract, link, doi, status, part, matched_keywords")
+    .select("id, installment_id, journal_issue_id, author, title, journal, volume, issue, year, tier, abstract, link, doi, status, part, matched_keywords, created_at")
     .eq("installment_id", installmentId)
-    .order("journal", { ascending: true })
-    .order("title", { ascending: true });
+    .order("created_at", { ascending: true });
   if (error) throw error;
   return data;
 }
@@ -271,9 +295,7 @@ export async function updateArticle(id, patch) {
   return data;
 }
 
-// Bulk update — used by Stage 2's "Set all shown to Excluded" and similar.
-// Takes an array of { id, ...patch } objects. Performs one upsert call,
-// returning all updated rows.
+// Bulk update — takes an array of { id, ...patch } objects.
 export async function updateArticles(updates) {
   if (updates.length === 0) return [];
   const { data, error } = await supabase
@@ -292,16 +314,17 @@ export async function deleteArticle(id) {
   if (error) throw error;
 }
 
-// Replace the article pool for an installment — used when re-fetching from
-// Stage 1 Phase 1 after review work has been done (deletes existing articles
-// for the installment, then inserts the new set).
-export async function replaceArticlesForInstallment(installmentId, articles) {
+// Delete + insert articles for a specific journal_issue. Used by Stage 1
+// Phase 2 retry: the original articles for that journal_issue are dropped,
+// the newly-fetched ones inserted.
+export async function replaceArticlesForJournalIssue(installmentId, journalIssueId, articles) {
   const { error: delErr } = await supabase
     .from("articles")
     .delete()
-    .eq("installment_id", installmentId);
+    .eq("installment_id", installmentId)
+    .eq("journal_issue_id", journalIssueId);
   if (delErr) throw delErr;
-  return insertArticles(installmentId, articles);
+  return insertArticles(installmentId, articles.map(a => ({ ...a, journal_issue_id: journalIssueId })));
 }
 
 // ─── Keywords (per-installment) ──────────────────────────────────────────────
@@ -347,7 +370,8 @@ export async function removeKeyword(id) {
 }
 
 // Replace the entire keyword list for an installment in one operation —
-// used by the Keyword panel's "Reset to Default" button.
+// used by the keyword panel's "Reset to Default" button, and to seed the
+// initial keyword set on first entry into Stage 2.
 export async function replaceKeywordsForInstallment(installmentId, keywords) {
   const { error: delErr } = await supabase
     .from("keywords")
