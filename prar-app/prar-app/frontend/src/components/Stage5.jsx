@@ -1,169 +1,247 @@
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { PART_MAP, PART_COLORS } from "../data";
+import { COLORS, FONTS, styles } from "../lib/styles";
+import { ordinalFor } from "../lib/util";
+import { listArticles } from "../lib/db";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 
-const PART_COLORS = {
-  "Part 1": { bg: "#FFF3E0", border: "#FF6600", text: "#E65100" },
-  "Part 2": { bg: "#E3F2FD", border: "#2196F3", text: "#0D47A1" },
-  "Part 3": { bg: "#E8F5E9", border: "#4CAF50", text: "#1B5E20" },
-  "Part 4": { bg: "#F3E5F5", border: "#9C27B0", text: "#4A148C" },
-};
+function buildDefaultIntro(installmentNumber, seasonYear) {
+  const ord = ordinalFor(installmentNumber) || installmentNumber;
+  return `MESPI introduces the ${ord} installment of the Peer-Reviewed Articles Review (PRAR), ${seasonYear}, an annotated compilation of recent peer-reviewed articles related to the Middle East. The PRAR is a quarterly publication that brings together the latest scholarship in the field, organized for convenient reference. Articles are arranged in four parts: Part 1 features regional-focused Middle East studies journals, Part 2 covers area studies journals with significant Middle East content, Part 3 includes security, terrorism, and conflict journals, and Part 4 features general political science, international relations, and area studies journals with Middle East content. We invite scholars and students to use this compilation as a starting point for further research.`;
+}
 
-export default function Stage5({ job, goToStage, onBack }) {
-  const [downloading, setDownloading] = useState({});
+export default function Stage5({ installment, goToStage }) {
+  const [articles, setArticles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [downloading, setDownloading] = useState(null);  // 'zip' | 'xlsx' | null
   const [error, setError] = useState("");
 
-  async function downloadDocs() {
-    setDownloading(d => ({ ...d, docs: true }));
+  const intro = useMemo(
+    () => installment.intro_override || buildDefaultIntro(installment.installment_number, installment.season_year),
+    [installment.intro_override, installment.installment_number, installment.season_year]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const all = await listArticles(installment.id);
+        const approved = all
+          .filter(a => a.status === "approved" || a.status === "auto-approved")
+          .map(a => ({ ...a, part: a.part || PART_MAP[(a.journal || "").trim()] || "" }));
+        if (!cancelled) setArticles(approved);
+      } catch (err) {
+        if (!cancelled) setLoadError(err.message || "Could not load articles.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [installment.id]);
+
+  const counts = useMemo(() => ({
+    "Part 1": articles.filter(a => a.part === "Part 1").length,
+    "Part 2": articles.filter(a => a.part === "Part 2").length,
+    "Part 3": articles.filter(a => a.part === "Part 3").length,
+    "Part 4": articles.filter(a => a.part === "Part 4").length,
+  }), [articles]);
+
+  function articlesPayload() {
+    return articles.map(a => ({
+      author: a.author, title: a.title, journal: a.journal,
+      volume: a.volume, issue: a.issue, year: a.year,
+      tier: a.tier, abstract: a.abstract, link: a.link, doi: a.doi,
+      status: a.status, part: a.part,
+    }));
+  }
+
+  async function downloadZip() {
     setError("");
+    setDownloading("zip");
     try {
       const resp = await fetch(`${BACKEND}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          installment_number: job.installmentNumber,
-          season_year: job.seasonYear,
-          articles: job.articles,
-          intro_override: job.introText || null,
+          installment_number: installment.installment_number,
+          season_year: installment.season_year,
+          articles: articlesPayload(),
+          intro_override: intro,
         }),
       });
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`ZIP download failed (${resp.status}): ${text.slice(0, 200)}`);
+      }
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `PRAR_Installment_${job.installmentNumber}.zip`;
+      a.download = `PRAR_${installment.installment_number}_${installment.season_year.replace(/\s+/g, "_")}.zip`;
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (e) {
-      setError("Download failed: " + e.message + ". The backend may be waking up — please try again in 30 seconds.");
+    } catch (err) {
+      setError(err.message || "Download failed.");
     } finally {
-      setDownloading(d => ({ ...d, docs: false }));
+      setDownloading(null);
     }
   }
 
   async function downloadExcel() {
-    setDownloading(d => ({ ...d, excel: true }));
     setError("");
+    setDownloading("xlsx");
     try {
       const resp = await fetch(`${BACKEND}/export-excel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          installment_number: job.installmentNumber,
-          season_year: job.seasonYear,
-          articles: job.articles,
+          installment_number: installment.installment_number,
+          season_year: installment.season_year,
+          articles: articlesPayload(),
         }),
       });
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`Excel download failed (${resp.status}): ${text.slice(0, 200)}`);
+      }
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `PRAR_Installment_${job.installmentNumber}_Compiled.xlsx`;
+      a.download = `PRAR_${installment.installment_number}_${installment.season_year.replace(/\s+/g, "_")}.xlsx`;
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (e) {
-      setError("Download failed: " + e.message);
+    } catch (err) {
+      setError(err.message || "Download failed.");
     } finally {
-      setDownloading(d => ({ ...d, excel: false }));
+      setDownloading(null);
     }
   }
 
-  const partCounts = ["Part 1","Part 2","Part 3","Part 4"].map(p => ({
-    part: p,
-    count: (job.articles || []).filter(a => a.part === p).length,
-  }));
+  if (loading) return <div style={{ padding: 80, textAlign: "center", color: COLORS.textMuted, fontFamily: FONTS.serif }}>Loading…</div>;
+  if (loadError) return (
+    <div style={{ padding: 80, textAlign: "center", fontFamily: FONTS.serif }}>
+      <div style={{ color: COLORS.danger, marginBottom: 12 }}>{loadError}</div>
+      <button onClick={() => window.location.reload()} style={styles.btnOutline}>Reload</button>
+    </div>
+  );
 
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 800, margin: "0 auto" }}>
-      <h2 style={h2}>Stage 5 — Download</h2>
-      <p style={{ color: "#7a6a5a", fontSize: 14, marginBottom: 28 }}>
-        Your PRAR Installment {job.installmentNumber} is ready. Download your documents below.
-      </p>
+    <div style={{ padding: "28px 32px", maxWidth: 880, margin: "0 auto" }}>
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={styles.h2}>Stage 5 — Download</h2>
+        <p style={{ color: COLORS.textMuted, fontSize: 14, margin: 0, maxWidth: 720 }}>
+          Your installment is ready. Download the four PRAR Word documents and the compiled Excel workbook for your archive.
+        </p>
+      </div>
+
+      {error && <div style={styles.banner("error")} role="alert">{error}</div>}
 
       {/* Summary */}
-      <div style={{ background: "#fff", border: "1px solid #e0d6c8", borderRadius: 8, padding: "20px 24px", marginBottom: 24 }}>
-        <h3 style={cardTitle}>Installment Summary</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
-          <div style={infoRow}><span style={infoLabel}>Installment</span><span>{job.name}</span></div>
-          <div style={infoRow}><span style={infoLabel}>Number</span><span>#{job.installmentNumber}</span></div>
-          <div style={infoRow}><span style={infoLabel}>Season / Year</span><span>{job.seasonYear}</span></div>
-          <div style={infoRow}><span style={infoLabel}>Total Articles</span><span>{(job.articles||[]).length}</span></div>
+      <div style={{ ...styles.card, marginBottom: 18 }}>
+        <h3 style={styles.h3}>Installment summary</h3>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+          <SummaryPill label="Name" value={installment.name} />
+          <SummaryPill label="Installment" value={`#${installment.installment_number}`} />
+          <SummaryPill label="Season / Year" value={installment.season_year} />
+          <SummaryPill label="Total approved" value={`${articles.length} articles`} />
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
-          {partCounts.map(({ part, count }) => {
-            const pc = PART_COLORS[part];
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {["Part 1","Part 2","Part 3","Part 4"].map(p => {
+            const pc = PART_COLORS[p];
             return (
-              <div key={part} style={{
-                flex: 1, background: pc.bg, border: `1px solid ${pc.border}`,
-                borderRadius: 6, padding: "8px 12px", textAlign: "center",
+              <div key={p} style={{
+                background: pc.bg, border: `1px solid ${pc.border}`, borderRadius: 8,
+                padding: "10px 16px", display: "flex", flexDirection: "column",
+                alignItems: "center", color: pc.text,
+                fontFamily: FONTS.serif, minWidth: 90,
               }}>
-                <div style={{ fontSize: 20, fontWeight: 600, color: pc.text, fontFamily: "Crimson Text, serif" }}>{count}</div>
-                <div style={{ fontSize: 12, color: pc.text, fontFamily: "Crimson Text, serif" }}>{part}</div>
+                <span style={{ fontSize: 20, fontWeight: 600 }}>{counts[p]}</span>
+                <span style={{ fontSize: 11 }}>{p}</span>
               </div>
             );
           })}
         </div>
       </div>
 
-      {error && (
-        <div style={{ background: "#ff7c7c22", border: "1px solid #ff7c7c", borderRadius: 6, padding: "10px 16px", color: "#ff7c7c", marginBottom: 16, fontSize: 14 }}>
-          {error}
-        </div>
-      )}
-
-      {/* Download buttons */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={downloadCard}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 600, fontSize: 15, color: "#2c1810", marginBottom: 4 }}>
-              📄 PRAR Documents (ZIP)
-            </div>
-            <div style={{ fontSize: 13, color: "#888" }}>
-              4 Word documents — one per Part — with titles, intro paragraphs, and hyperlinked article titles.
-              <br />
-              <span style={{ fontSize: 12 }}>
-                {["Part 1","Part 2","Part 3","Part 4"].map(p => `PRAR_Installment_${job.installmentNumber}_${p.replace(" ","_")}.docx`).join(" · ")}
-              </span>
-            </div>
-          </div>
-          <button onClick={downloadDocs} disabled={downloading.docs} style={{ ...btnDownload("#2c1810", "#d4af7a"), opacity: downloading.docs ? 0.6 : 1 }}>
-            {downloading.docs ? "⏳ Generating..." : "⬇ Download ZIP"}
+      {/* Intro (read-only) */}
+      <div style={{ ...styles.card, marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <h3 style={{ ...styles.h3, margin: 0 }}>Introduction</h3>
+          <button onClick={() => goToStage(4)} style={{ ...styles.btnSubtle, fontSize: 12, padding: "4px 12px" }}>
+            ← Edit in Stage 4
           </button>
         </div>
-
-        <div style={downloadCard}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 600, fontSize: 15, color: "#2c1810", marginBottom: 4 }}>
-              📊 Compiled Data (Excel)
-            </div>
-            <div style={{ fontSize: 13, color: "#888" }}>
-              Excel workbook with All Articles sheet + Part 1–4 sheets, color-coded by part.
-              <br />
-              <span style={{ fontSize: 12 }}>PRAR_Installment_{job.installmentNumber}_Compiled.xlsx</span>
-            </div>
-          </div>
-          <button onClick={downloadExcel} disabled={downloading.excel} style={{ ...btnDownload("#2c6e49", "#fff"), opacity: downloading.excel ? 0.6 : 1 }}>
-            {downloading.excel ? "⏳ Generating..." : "⬇ Download Excel"}
-          </button>
+        <div style={{
+          background: COLORS.bgPanelDeep, border: `1px solid ${COLORS.borderSoft}`,
+          padding: "14px 16px", borderRadius: 5,
+          fontFamily: FONTS.serif, fontSize: 14, lineHeight: 1.5,
+          color: COLORS.textBody,
+        }}>
+          {intro}
         </div>
       </div>
 
-      <div style={{ marginTop: 28, paddingTop: 20, borderTop: "1px solid #e0d6c8" }}>
-        <button onClick={onBack} style={{ ...btnOutline, marginRight: 12 }}>← Back to Dashboard</button>
-        <span style={{ color: "#aaa", fontSize: 13 }}>
-          This installment is saved. You can return to it anytime from the Dashboard.
-        </span>
+      {/* Downloads */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <DownloadCard
+          title="Four PRAR Word documents"
+          subtitle="One .docx per Part, packaged into a single ZIP. This is the final publication output."
+          buttonLabel={downloading === "zip" ? "Building ZIP…" : "↓ Download ZIP"}
+          onClick={downloadZip}
+          disabled={!!downloading || articles.length === 0}
+        />
+        <DownloadCard
+          title="Compiled Excel workbook"
+          subtitle="All approved articles in one .xlsx — useful for your archive or for re-importing into a later installment."
+          buttonLabel={downloading === "xlsx" ? "Building XLSX…" : "↓ Download XLSX"}
+          onClick={downloadExcel}
+          disabled={!!downloading || articles.length === 0}
+        />
       </div>
     </div>
   );
 }
 
-const h2 = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 22, fontWeight: 400, margin: "0 0 4px" };
-const cardTitle = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 16, fontWeight: 600, margin: "0 0 14px" };
-const infoRow = { display: "flex", flexDirection: "column", background: "#faf8f5", borderRadius: 5, padding: "8px 12px" };
-const infoLabel = { fontSize: 11, color: "#aaa", marginBottom: 2, letterSpacing: 0.5 };
-const downloadCard = { background: "#fff", border: "1px solid #e0d6c8", borderRadius: 8, padding: "18px 20px", display: "flex", alignItems: "center", gap: 20 };
-const btnDownload = (bg, color) => ({ background: bg, color, border: "none", padding: "10px 22px", borderRadius: 6, fontFamily: "Crimson Text, serif", fontSize: 14, cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap" });
-const btnOutline = { background: "transparent", color: "#2c1810", border: "1px solid #2c1810", padding: "7px 16px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 13, cursor: "pointer" };
+function SummaryPill({ label, value }) {
+  return (
+    <div style={{
+      background: COLORS.bgPanelDeep,
+      border: `1px solid ${COLORS.borderSoft}`,
+      borderRadius: 6, padding: "6px 14px",
+      fontFamily: FONTS.serif,
+    }}>
+      <div style={{ fontSize: 10, color: COLORS.goldMuted, letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 14, color: COLORS.textBody, fontWeight: 500 }}>{value}</div>
+    </div>
+  );
+}
+
+function DownloadCard({ title, subtitle, buttonLabel, onClick, disabled }) {
+  return (
+    <div style={{
+      background: COLORS.bgPanel,
+      border: `1px solid ${COLORS.borderSoft}`,
+      borderRadius: 10, padding: "20px 22px",
+      boxShadow: COLORS.shadowSoft,
+      display: "flex", flexDirection: "column", gap: 10,
+    }}>
+      <h3 style={{ ...styles.h3, margin: 0 }}>{title}</h3>
+      <p style={{ color: COLORS.textMuted, fontSize: 13, lineHeight: 1.5, margin: 0, flex: 1 }}>{subtitle}</p>
+      <button onClick={onClick} disabled={disabled} style={{
+        ...styles.btnPrimary,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "default" : "pointer",
+        alignSelf: "flex-start",
+      }}>{buttonLabel}</button>
+    </div>
+  );
+}

@@ -1,259 +1,249 @@
-import { useState } from "react";
-
-const ORDINALS = {
-  1:"first",2:"second",3:"third",4:"fourth",5:"fifth",6:"sixth",7:"seventh",
-  8:"eighth",9:"ninth",10:"tenth",11:"eleventh",12:"twelfth",13:"thirteenth",
-  14:"fourteenth",15:"fifteenth",16:"sixteenth",17:"seventeenth",18:"eighteenth",
-  19:"nineteenth",20:"twentieth",21:"twenty-first",22:"twenty-second",
-  23:"twenty-third",24:"twenty-fourth",25:"twenty-fifth",26:"twenty-sixth",
-  27:"twenty-seventh",28:"twenty-eighth",29:"twenty-ninth",30:"thirtieth",
-  31:"thirty-first",32:"thirty-second",33:"thirty-third",34:"thirty-fourth",
-  35:"thirty-fifth",36:"thirty-sixth",37:"thirty-seventh",38:"thirty-eighth",
-  39:"thirty-ninth",40:"fortieth",50:"fiftieth"
-};
+import { useState, useEffect, useMemo } from "react";
+import { PART_MAP, PART_COLORS } from "../data";
+import { COLORS, FONTS, styles } from "../lib/styles";
+import { ordinalFor } from "../lib/util";
+import { listArticles } from "../lib/db";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 
-export default function Stage4({ job, updateJob, goToStage }) {
-  const ordinal = ORDINALS[job.installmentNumber] || `${job.installmentNumber}th`;
-  const introTemplate = `The Middle East Studies Pedagogy Initiative (MESPI) brings you the ${ordinal} in a series of "Peer-Reviewed Article Reviews" in which we present a collection of journals and their articles concerned with the Middle East and Arab world. This series will be published seasonally. Each issue will comprise three-to-four parts, depending on the number of articles included.`;
+function buildDefaultIntro(installmentNumber, seasonYear) {
+  const ord = ordinalFor(installmentNumber) || installmentNumber;
+  return `MESPI introduces the ${ord} installment of the Peer-Reviewed Articles Review (PRAR), ${seasonYear}, an annotated compilation of recent peer-reviewed articles related to the Middle East. The PRAR is a quarterly publication that brings together the latest scholarship in the field, organized for convenient reference. Articles are arranged in four parts: Part 1 features regional-focused Middle East studies journals, Part 2 covers area studies journals with significant Middle East content, Part 3 includes security, terrorism, and conflict journals, and Part 4 features general political science, international relations, and area studies journals with Middle East content. We invite scholars and students to use this compilation as a starting point for further research.`;
+}
 
-  const [introText, setIntroText] = useState(job.introText || introTemplate);
+export default function Stage4({ installment, setIntroOverride, goToStage }) {
+  const [articles, setArticles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [introText, setIntroText] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewPart, setPreviewPart] = useState("Part 1");
   const [error, setError] = useState("");
-  const [done, setDone] = useState(false);
-  const [zipBlob, setZipBlob] = useState(null);
 
-  const partCounts = ["Part 1","Part 2","Part 3","Part 4"].map(p => ({
-    part: p,
-    count: (job.articles || []).filter(a => a.part === p).length,
-  }));
+  const defaultIntro = useMemo(
+    () => buildDefaultIntro(installment.installment_number, installment.season_year),
+    [installment.installment_number, installment.season_year]
+  );
+
+  // Load articles on mount; seed intro from override or default.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const all = await listArticles(installment.id);
+        const approved = all
+          .filter(a => a.status === "approved" || a.status === "auto-approved")
+          .map(a => ({ ...a, part: a.part || PART_MAP[(a.journal || "").trim()] || "" }));
+        if (!cancelled) {
+          setArticles(approved);
+          setIntroText(installment.intro_override || defaultIntro);
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError(err.message || "Could not load articles.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [installment.id, installment.intro_override, defaultIntro]);
+
+  // Persist intro_override when the user changes it. We use a small debounce
+  // so we don't write on every keystroke.
+  useEffect(() => {
+    if (!introText) return;
+    if (loading) return;
+    // If the text matches the default exactly, clear the override (store null).
+    const target = introText === defaultIntro ? null : introText;
+    const handle = setTimeout(() => {
+      setIntroOverride(target).catch(err => setError(err.message || "Could not save intro."));
+    }, 600);
+    return () => clearTimeout(handle);
+  }, [introText, defaultIntro, loading, setIntroOverride]);
+
+  const counts = useMemo(() => ({
+    "Part 1": articles.filter(a => a.part === "Part 1").length,
+    "Part 2": articles.filter(a => a.part === "Part 2").length,
+    "Part 3": articles.filter(a => a.part === "Part 3").length,
+    "Part 4": articles.filter(a => a.part === "Part 4").length,
+  }), [articles]);
 
   async function handleGenerate() {
-    setGenerating(true);
     setError("");
+    setGenerating(true);
     try {
       const resp = await fetch(`${BACKEND}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          installment_number: job.installmentNumber,
-          season_year: job.seasonYear,
-          articles: job.articles,
+          installment_number: installment.installment_number,
+          season_year: installment.season_year,
+          articles: articles.map(a => ({
+            author: a.author, title: a.title, journal: a.journal,
+            volume: a.volume, issue: a.issue, year: a.year,
+            tier: a.tier, abstract: a.abstract, link: a.link, doi: a.doi,
+            status: a.status, part: a.part,
+          })),
           intro_override: introText,
         }),
       });
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`Generate failed (${resp.status}): ${text.slice(0, 200)}`);
+      }
       const blob = await resp.blob();
-      setZipBlob(blob);
-      setDone(true);
-      updateJob({ stage: 5, introText, zipBlob: null }); // persist intro so Stage 5 can re-download with it
-    } catch (e) {
-      setError("Generation failed: " + e.message);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `PRAR_${installment.installment_number}_${installment.season_year.replace(/\s+/g, "_")}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      goToStage(5);
+    } catch (err) {
+      setError(err.message || "Generation failed.");
     } finally {
       setGenerating(false);
     }
   }
 
-  function downloadZip() {
-    if (!zipBlob) return;
-    const url = URL.createObjectURL(zipBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `PRAR_Installment_${job.installmentNumber}.zip`;
-    a.click();
-    URL.revokeObjectURL(url);
-    goToStage(5);
-  }
+  if (loading) return <div style={{ padding: 80, textAlign: "center", color: COLORS.textMuted, fontFamily: FONTS.serif }}>Loading…</div>;
+  if (loadError) return (
+    <div style={{ padding: 80, textAlign: "center", fontFamily: FONTS.serif }}>
+      <div style={{ color: COLORS.danger, marginBottom: 12 }}>{loadError}</div>
+      <button onClick={() => window.location.reload()} style={styles.btnOutline}>Reload</button>
+    </div>
+  );
 
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 900, margin: "0 auto" }}>
-      <h2 style={h2}>Stage 4 — Generate Documents</h2>
-      <p style={{ color: "#7a6a5a", fontSize: 14, marginBottom: 28 }}>
-        Review the document details below, then generate the four PRAR Word documents.
-      </p>
-
-      {/* Document titles preview */}
-      <div style={card}>
-        <h3 style={cardTitle}>Document Titles</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          {[1,2,3,4].map(n => (
-            <div key={n} style={{ background: "#fffbf0", border: "1px solid #e0d6c8", borderRadius: 6, padding: "10px 14px" }}>
-              <div style={{ fontSize: 11, color: "#888", marginBottom: 4, letterSpacing: 0.5 }}>PART {n}</div>
-              <div style={{ fontStyle: "italic", fontSize: 14, color: "#2c1810" }}>
-                Peer-Reviewed Articles Review: {job.seasonYear} (Part {n})
-              </div>
-              <div style={{ fontSize: 11, color: "#aaa", marginTop: 4 }}>
-                File: PRAR_Installment_{job.installmentNumber}_Part_{n}.docx
-              </div>
-            </div>
-          ))}
+    <div style={{ padding: "28px 32px", maxWidth: 960, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14, gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={styles.h2}>Stage 4 — Generate</h2>
+          <p style={{ color: COLORS.textMuted, fontSize: 14, margin: 0, maxWidth: 720 }}>
+            Review the introductory paragraph and per-part counts, preview any part if you'd like, then click Generate to build the four Word documents.
+          </p>
         </div>
+        <button onClick={handleGenerate} disabled={generating || articles.length === 0}
+          style={{ ...styles.btnPrimary, opacity: (generating || articles.length === 0) ? 0.5 : 1, cursor: (generating || articles.length === 0) ? "default" : "pointer" }}>
+          {generating ? "Generating…" : `Generate (${articles.length} articles) →`}
+        </button>
       </div>
 
-      {/* Intro paragraph editor */}
-      <div style={card}>
-        <h3 style={cardTitle}>Introductory Paragraph</h3>
-        <p style={{ color: "#888", fontSize: 13, marginBottom: 10 }}>
-          This paragraph appears at the top of all four documents, below the title. Edit if needed.
-        </p>
+      {error && <div style={styles.banner("error")} role="alert">{error}</div>}
+
+      {/* Per-part counts */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
+        {["Part 1","Part 2","Part 3","Part 4"].map(p => {
+          const pc = PART_COLORS[p];
+          return (
+            <div key={p} style={{
+              background: pc.bg, border: `1px solid ${pc.border}`, borderRadius: 8,
+              padding: "10px 18px", display: "flex", flexDirection: "column",
+              alignItems: "center", gap: 2, color: pc.text,
+              fontFamily: FONTS.serif, minWidth: 100,
+            }}>
+              <span style={{ fontSize: 22, fontWeight: 600 }}>{counts[p]}</span>
+              <span style={{ fontSize: 12 }}>{p}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Intro editor */}
+      <div style={{ ...styles.card, marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <h3 style={{ ...styles.h3, margin: 0 }}>Introduction</h3>
+          {introText !== defaultIntro && (
+            <button onClick={() => setIntroText(defaultIntro)} style={{ ...styles.btnSubtle, fontSize: 12, padding: "4px 12px" }}>
+              ↺ Reset to default
+            </button>
+          )}
+        </div>
         <textarea
           value={introText}
           onChange={e => setIntroText(e.target.value)}
-          rows={5}
-          style={{
-            width: "100%", fontFamily: "Crimson Text, serif", fontSize: 14,
-            border: "1px solid #d0c8b8", borderRadius: 6, padding: "10px 14px",
-            lineHeight: 1.6, color: "#2c1810", background: "#fffbf0",
-            boxSizing: "border-box", resize: "vertical",
-          }}
+          rows={10}
+          style={{ ...styles.textarea, minHeight: 200, fontSize: 14, lineHeight: 1.5 }}
+          aria-label="Introduction paragraph"
         />
-        <div style={{ marginTop: 8, fontSize: 12, color: "#aaa" }}>
-          The word in <span style={{ color: "#d4af7a" }}>gold</span> is auto-generated from installment #{job.installmentNumber}: "<em>{ordinal}</em>"
+        <div style={{ marginTop: 6, fontSize: 12, color: COLORS.textFaint }}>
+          {introText === defaultIntro
+            ? "Using default introduction template. Edits autosave."
+            : "Edits autosave. Reset link above returns to the default template."}
         </div>
       </div>
 
-      {/* Article counts */}
-      <div style={card}>
-        <h3 style={cardTitle}>Articles Per Part</h3>
-        <div style={{ display: "flex", gap: 12 }}>
-          {partCounts.map(({ part, count }) => (
-            <div key={part} style={{
-              flex: 1, background: count === 0 ? "#fff5f5" : "#f0faf0",
-              border: `1px solid ${count === 0 ? "#ffcdd2" : "#c8e6c9"}`,
-              borderRadius: 6, padding: "12px 16px", textAlign: "center",
-            }}>
-              <div style={{ fontSize: 24, fontWeight: 600, color: count === 0 ? "#e53935" : "#2c1810", fontFamily: "Crimson Text, serif" }}>{count}</div>
-              <div style={{ fontSize: 13, color: "#666", fontFamily: "Crimson Text, serif" }}>{part}</div>
-              {count === 0 && <div style={{ fontSize: 11, color: "#e53935", marginTop: 4 }}>Empty — document will be blank</div>}
-            </div>
-          ))}
+      {/* Preview */}
+      <div style={{ ...styles.card, marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+          <h3 style={{ ...styles.h3, margin: 0 }}>Document preview</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select value={previewPart} onChange={e => setPreviewPart(e.target.value)}
+              aria-label="Preview part"
+              style={{ ...styles.input, width: "auto", padding: "5px 10px", fontSize: 13 }}>
+              <option value="Part 1">Part 1 ({counts["Part 1"]})</option>
+              <option value="Part 2">Part 2 ({counts["Part 2"]})</option>
+              <option value="Part 3">Part 3 ({counts["Part 3"]})</option>
+              <option value="Part 4">Part 4 ({counts["Part 4"]})</option>
+            </select>
+            <button onClick={() => setShowPreview(s => !s)} style={styles.btnOutline}>
+              {showPreview ? "▲ Hide" : "▼ Show"} preview
+            </button>
+          </div>
         </div>
-      </div>
-
-      {error && (
-        <div style={{ background: "#ff7c7c22", border: "1px solid #ff7c7c", borderRadius: 6, padding: "10px 16px", color: "#ff7c7c", marginBottom: 16, fontSize: 14 }}>
-          {error}
-          <div style={{ marginTop: 6, fontSize: 12 }}>Note: If this is the first request in a while, the backend may be waking up (30–60 seconds). Please try again.</div>
-        </div>
-      )}
-
-      {/* Document preview */}
-      <DocumentPreview
-        articles={job.articles || []}
-        seasonYear={job.seasonYear}
-        introText={introText}
-        installmentNumber={job.installmentNumber}
-      />
-
-      {error && (
-        <div style={{ background: "#ff7c7c22", border: "1px solid #ff7c7c", borderRadius: 6, padding: "10px 16px", color: "#ff7c7c", marginBottom: 16, fontSize: 14 }}>
-          {error}
-          <div style={{ marginTop: 6, fontSize: 12 }}>Note: If this is the first request in a while, the backend may be waking up (30–60 seconds). Please try again.</div>
-        </div>
-      )}
-
-      <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-        {!done ? (
-          <button onClick={handleGenerate} disabled={generating} style={{ ...btnPrimary, opacity: generating ? 0.6 : 1, fontSize: 15, padding: "10px 28px" }}>
-            {generating ? "⏳ Generating documents..." : "Generate 4 PRAR Documents"}
-          </button>
-        ) : (
-          <button onClick={downloadZip} style={{ ...btnPrimary, background: "#2c6e49", fontSize: 15, padding: "10px 28px" }}>
-            ⬇ Download ZIP (4 documents) & Proceed
-          </button>
+        {showPreview && (
+          <DocumentPreview
+            installment={installment}
+            articles={articles.filter(a => a.part === previewPart)}
+            intro={introText}
+            part={previewPart}
+          />
         )}
       </div>
     </div>
   );
 }
 
-const h2 = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 22, fontWeight: 400, margin: "0 0 4px" };
-const btnPrimary = { background: "#2c1810", color: "#d4af7a", border: "none", padding: "8px 20px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 14, cursor: "pointer", fontWeight: 600 };
-const card = { background: "#fff", border: "1px solid #e0d6c8", borderRadius: 8, padding: "20px 24px", marginBottom: 20 };
-const cardTitle = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 16, fontWeight: 600, margin: "0 0 14px" };
-
-function DocumentPreview({ articles, seasonYear, introText, installmentNumber }) {
-  const [previewPart, setPreviewPart] = useState("Part 1");
-  const [showPreview, setShowPreview] = useState(false);
-
-  const partArticles = articles
-    .filter(a => a.part === previewPart)
-    .sort((a, b) => a.journal.localeCompare(b.journal))
-    .slice(0, 5);
-
+function DocumentPreview({ installment, articles, intro, part }) {
+  const pc = PART_COLORS[part];
+  const sample = articles.slice(0, 5);
   return (
-    <div style={card}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showPreview ? 14 : 0 }}>
-        <h3 style={{ ...cardTitle, margin: 0 }}>Document Preview</h3>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {showPreview && (
-            <select value={previewPart} onChange={e => setPreviewPart(e.target.value)} style={{
-              fontFamily: "Crimson Text, serif", fontSize: 13, padding: "4px 10px",
-              border: "1px solid #d0c8b8", borderRadius: 5, background: "#fff",
-            }}>
-              {["Part 1","Part 2","Part 3","Part 4"].map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-          )}
-          <button onClick={() => setShowPreview(s => !s)} style={{
-            background: "transparent", color: "#2c1810", border: "1px solid #2c1810",
-            padding: "5px 14px", borderRadius: 5, fontFamily: "Crimson Text, serif",
-            fontSize: 13, cursor: "pointer",
-          }}>
-            {showPreview ? "▲ Hide Preview" : "▼ Show Preview"}
-          </button>
+    <div style={{
+      background: "#f5e9d0", color: "#1a1a1a",
+      padding: "24px 28px", borderRadius: 6,
+      border: `2px solid ${pc.border}`,
+      fontFamily: "Georgia, serif", fontSize: 13, lineHeight: 1.5,
+    }}>
+      <div style={{ textAlign: "center", marginBottom: 18 }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, color: "#666", textTransform: "uppercase", marginBottom: 8 }}>
+          MESPI · Installment #{installment.installment_number} · {installment.season_year}
         </div>
+        <h2 style={{ fontSize: 22, margin: "0 0 6px", color: pc.text }}>{part}</h2>
+        <div style={{ width: 60, height: 2, background: pc.border, margin: "0 auto" }} />
       </div>
-
-      {showPreview && (
-        <div>
-          <div style={{ fontSize: 12, color: "#888", marginBottom: 14 }}>
-            Showing first {partArticles.length} articles of {articles.filter(a => a.part === previewPart).length} in {previewPart}
+      <p style={{ marginBottom: 18 }}>{intro}</p>
+      {sample.length === 0 ? (
+        <div style={{ color: "#666", fontStyle: "italic" }}>No articles in {part}.</div>
+      ) : sample.map((a, i) => (
+        <div key={a.id || i} style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 600 }}>{a.author || "—"}, "{a.title || "—"}"</div>
+          <div style={{ fontStyle: "italic", color: "#555", marginBottom: 4 }}>
+            {a.journal}{a.volume && `, ${a.volume}`}{a.issue && `:${a.issue}`}{a.year && ` (${a.year})`}
           </div>
-          {/* Simulated document */}
-          <div style={{
-            background: "#fff", border: "1px solid #d0c8b8", borderRadius: 6,
-            padding: "32px 40px", fontFamily: "Garamond, Georgia, serif",
-            maxHeight: "70vh", overflowY: "auto", boxShadow: "inset 0 1px 4px rgba(0,0,0,0.06)",
-          }}>
-            {/* Document title */}
-            <div style={{ fontStyle: "italic", fontSize: 16, marginBottom: 16, color: "#2c1810" }}>
-              Peer-Reviewed Articles Review: {seasonYear} ({previewPart})
+          {a.abstract && (
+            <div style={{ color: "#333", fontSize: 12 }}>
+              {a.abstract.slice(0, 280)}{a.abstract.length > 280 ? "…" : ""}
             </div>
-            {/* Intro */}
-            <div style={{ fontSize: 13, lineHeight: 1.7, marginBottom: 24, color: "#333" }}>
-              {introText}
-            </div>
-            {/* Articles */}
-            {partArticles.length === 0 ? (
-              <div style={{ color: "#aaa", fontSize: 13, fontStyle: "italic" }}>No articles in this part.</div>
-            ) : (
-              partArticles.map((art, i) => {
-                const showJournal = i === 0 || art.journal !== partArticles[i - 1].journal;
-                return (
-                  <div key={i} style={{ marginBottom: 18 }}>
-                    {showJournal && (
-                      <div style={{ fontStyle: "italic", fontSize: 13, color: "#2c1810", marginBottom: 6, marginTop: i > 0 ? 14 : 0 }}>
-                        {art.journal} (Volume {art.volume}, Issue {art.issue})
-                      </div>
-                    )}
-                    <div style={{ fontSize: 13, color: "#1a6bb5", marginBottom: 4 }}>
-                      {art.link
-                        ? <a href={art.link} target="_blank" rel="noopener noreferrer" style={{ color: "#1a6bb5" }}>{art.title}</a>
-                        : art.title}
-                    </div>
-                    <div style={{ fontSize: 12, color: "#444", marginBottom: 3 }}>By: {art.author}</div>
-                    <div style={{ fontSize: 12, color: "#555", lineHeight: 1.5 }}>Abstract: {art.abstract}</div>
-                  </div>
-                );
-              })
-            )}
-            {articles.filter(a => a.part === previewPart).length > 5 && (
-              <div style={{ color: "#aaa", fontSize: 12, fontStyle: "italic", marginTop: 12, borderTop: "1px solid #eee", paddingTop: 10 }}>
-                … and {articles.filter(a => a.part === previewPart).length - 5} more articles
-              </div>
-            )}
-          </div>
+          )}
+        </div>
+      ))}
+      {articles.length > 5 && (
+        <div style={{ color: "#666", fontSize: 11, marginTop: 12, fontStyle: "italic" }}>
+          + {articles.length - 5} more articles in this part…
         </div>
       )}
     </div>

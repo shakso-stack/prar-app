@@ -1,32 +1,85 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import AccessibleGrid from "../lib/AccessibleGrid.jsx";
+import { COLORS, FONTS, styles } from "../lib/styles";
+import {
+  listJournalIssues, addJournalIssue, updateJournalIssue, deleteJournalIssue,
+  insertArticles, replaceArticlesForJournalIssue,
+} from "../lib/db";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 
-// ─── Phase 1: Journal Template ───────────────────────────────────────────────
+// ─── Stage 1 Phase 1 — Journal template ──────────────────────────────────────
 
-function Phase1({ rows, setRows, onFetchComplete }) {
+function Phase1({ installmentId, rows, setRows, onAdvanceToPhase2, touchInstallment }) {
   const [fetching, setFetching] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0, current: "" });
   const [error, setError] = useState("");
   const [filterText, setFilterText] = useState("");
-
-  function updateCell(id, field, value) {
-    setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
-  }
-
-  function addRow() {
-    const newId = Math.max(0, ...rows.map(r => r.id)) + 1;
-    setRows(prev => [...prev, { id: newId, tier: "", journal: "", issn: "", volume: "", issue: "", year: "" }]);
-  }
-
-  function deleteRow(id) {
-    setRows(prev => prev.filter(r => r.id !== id));
-  }
+  const [announcement, setAnnouncement] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [showAddRow, setShowAddRow] = useState(false);
+  const [newRow, setNewRow] = useState({ tier: "1", journal: "", issn: "", volume: "", issue: "", year: "" });
+  const [addError, setAddError] = useState("");
 
   const filled = rows.filter(r => (r.volume && r.volume.trim()) || (r.issue && r.issue.trim()));
-  const filtered = rows.filter(r =>
-    !filterText || r.journal.toLowerCase().includes(filterText.toLowerCase())
+  const filtered = useMemo(
+    () => rows.filter(r => !filterText || (r.journal || "").toLowerCase().includes(filterText.toLowerCase())),
+    [rows, filterText]
   );
+
+  async function handleCellEdit(row, columnKey, newValue) {
+    const patch = {};
+    if (columnKey === "tier")    patch.tier    = newValue || null;
+    else if (columnKey === "journal") patch.journal = newValue ? newValue.trim() : "";
+    else if (columnKey === "issn")    patch.issn    = newValue ? newValue.trim() : null;
+    else if (columnKey === "volume")  patch.volume  = newValue ? newValue.trim() : null;
+    else if (columnKey === "issue")   patch.issue   = newValue ? newValue.trim() : null;
+    else if (columnKey === "year")    patch.year    = newValue ? newValue.trim() : null;
+    else return;
+
+    setRows(prev => prev.map(r => r.id === row.id ? { ...r, ...patch } : r));
+    try {
+      const updated = await updateJournalIssue(row.id, patch);
+      setRows(prev => prev.map(r => r.id === row.id ? { ...r, ...updated } : r));
+    } catch (err) {
+      setRows(prev => prev.map(r => r.id === row.id ? row : r));
+      setError(err.message || "Could not save change.");
+    }
+  }
+
+  async function handleAddRow() {
+    if (!newRow.journal.trim()) { setAddError("Journal name is required."); return; }
+    setAddError("");
+    try {
+      const created = await addJournalIssue(installmentId, {
+        tier:    newRow.tier    || null,
+        journal: newRow.journal.trim(),
+        issn:    newRow.issn.trim()    || null,
+        volume:  newRow.volume.trim()  || null,
+        issue:   newRow.issue.trim()   || null,
+        year:    newRow.year.trim()    || null,
+      });
+      setRows(prev => [...prev, created]);
+      setNewRow({ tier: "1", journal: "", issn: "", volume: "", issue: "", year: "" });
+      setShowAddRow(false);
+      setAnnouncement(`Journal "${created.journal}" added.`);
+    } catch (err) {
+      setAddError(err.message || "Could not add row.");
+    }
+  }
+
+  async function handleDelete(row) {
+    setConfirmDeleteId(null);
+    const prev = rows;
+    setRows(p => p.filter(r => r.id !== row.id));
+    try {
+      await deleteJournalIssue(row.id);
+      setAnnouncement(`Row "${row.journal}" removed.`);
+    } catch (err) {
+      setRows(prev);
+      setError(err.message || "Could not delete row.");
+    }
+  }
 
   async function handleFetch() {
     const toFetch = rows.filter(r => r.issn && (r.volume || r.issue));
@@ -36,10 +89,7 @@ function Phase1({ rows, setRows, onFetchComplete }) {
     }
     setError("");
     setFetching(true);
-    setProgress({ done: 0, total: toFetch.length, current: "Starting..." });
-
-    const results = [];
-    let allArticles = [];
+    setProgress({ done: 0, total: toFetch.length, current: "Starting…" });
 
     for (let i = 0; i < toFetch.length; i++) {
       const entry = toFetch[i];
@@ -48,68 +98,149 @@ function Phase1({ rows, setRows, onFetchComplete }) {
         const resp = await fetch(`${BACKEND}/fetch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ issues: [entry] }),
+          body: JSON.stringify({
+            issues: [{
+              tier: String(entry.tier ?? ""),
+              journal: entry.journal,
+              issn: entry.issn,
+              volume: entry.volume || "",
+              issue: entry.issue || "",
+              year: entry.year || "",
+            }],
+          }),
         });
         if (resp.ok) {
           const data = await resp.json();
           const count = data.articles.length;
-          allArticles = [...allArticles, ...data.articles];
-          results.push({ ...entry, fetchStatus: count > 0 ? "ok" : "empty", count });
+          if (count > 0) {
+            await insertArticles(installmentId, data.articles.map(a => ({ ...a, journal_issue_id: entry.id })));
+          }
+          await updateJournalIssue(entry.id, {
+            fetch_status: count > 0 ? "ok" : "empty",
+            fetch_count: count,
+          });
+          setRows(prev => prev.map(r => r.id === entry.id
+            ? { ...r, fetch_status: count > 0 ? "ok" : "empty", fetch_count: count }
+            : r));
         } else {
-          results.push({ ...entry, fetchStatus: "failed", count: 0 });
+          await updateJournalIssue(entry.id, { fetch_status: "failed", fetch_count: 0 });
+          setRows(prev => prev.map(r => r.id === entry.id ? { ...r, fetch_status: "failed", fetch_count: 0 } : r));
         }
-      } catch (e) {
-        results.push({ ...entry, fetchStatus: "failed", count: 0 });
+      } catch {
+        await updateJournalIssue(entry.id, { fetch_status: "failed", fetch_count: 0 });
+        setRows(prev => prev.map(r => r.id === entry.id ? { ...r, fetch_status: "failed", fetch_count: 0 } : r));
       }
     }
 
     setProgress({ done: toFetch.length, total: toFetch.length, current: "Complete!" });
     setFetching(false);
-    onFetchComplete(results, allArticles);
+    await touchInstallment();
+    onAdvanceToPhase2();
   }
 
-  const COLS = [
-    { key: "tier", label: "Tier", width: 55 },
-    { key: "journal", label: "Journal", width: 280 },
-    { key: "issn", label: "ISSN", width: 120 },
-    { key: "volume", label: "Volume", width: 75 },
-    { key: "issue", label: "Issue", width: 65 },
-    { key: "year", label: "Year", width: 75 },
-  ];
+  const columns = useMemo(() => [
+    { key: "tier",    label: "Tier",    width: "60px",
+      render: r => r.tier || "—",
+      editor: { kind: "select", options: [
+        { value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "", label: "—" },
+      ] },
+    },
+    { key: "journal", label: "Journal", width: "minmax(240px, 2.2fr)",
+      render: r => r.journal || "(no name)",
+      editor: { kind: "text" },
+    },
+    { key: "issn",    label: "ISSN",    width: "120px",
+      render: r => r.issn || "—",
+      editor: { kind: "text" },
+    },
+    { key: "volume",  label: "Volume",  width: "80px",
+      render: r => <span style={{ color: r.volume ? COLORS.success : COLORS.textFaint, fontWeight: r.volume ? 600 : 400 }}>{r.volume || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    { key: "issue",   label: "Issue",   width: "70px",
+      render: r => <span style={{ color: r.issue ? COLORS.success : COLORS.textFaint }}>{r.issue || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    { key: "year",    label: "Year",    width: "80px",
+      render: r => <span style={{ color: r.year ? COLORS.success : COLORS.textFaint }}>{r.year || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    { key: "_delete", label: "",        width: "50px",
+      render: () => <span aria-label="Delete row" style={{
+        color: COLORS.danger, width: "100%", textAlign: "center", fontSize: 16,
+      }}>✕</span>,
+      onActivate: (row) => setConfirmDeleteId(row.id),
+    },
+  ], []);
+
+  const rowToDelete = confirmDeleteId ? rows.find(r => r.id === confirmDeleteId) : null;
 
   return (
     <div style={{ padding: "28px 32px", maxWidth: 1100, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
+      <div role="status" aria-live="polite" style={srOnly}>{announcement}</div>
+
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, gap: 16, flexWrap: "wrap" }}>
         <div>
-          <h2 style={h2}>Stage 1 — Fetch Articles</h2>
-          <p style={{ color: "#7a6a5a", fontSize: 14, margin: 0 }}>
+          <h2 style={styles.h2}>Stage 1 — Fetch Articles</h2>
+          <p style={{ color: COLORS.textMuted, fontSize: 14, margin: 0, maxWidth: 720 }}>
             Fill in the Volume and/or Issue, and Year columns for the journals you want to include, then click Fetch Articles.
-            {filled.length > 0 && <span style={{ color: "#d4af7a", marginLeft: 8 }}>{filled.length} journal{filled.length !== 1 ? "s" : ""} ready to fetch.</span>}
+            {filled.length > 0 && <span style={{ color: COLORS.gold, marginLeft: 8 }}>{filled.length} journal{filled.length !== 1 ? "s" : ""} ready to fetch.</span>}
           </p>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <input placeholder="Filter journals..." value={filterText}
-            onChange={e => setFilterText(e.target.value)} style={{ ...inputStyle, width: 200 }} />
-          <button onClick={addRow} style={btnOutline}>+ Add Row</button>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <input placeholder="Filter journals…" value={filterText}
+            onChange={e => setFilterText(e.target.value)}
+            aria-label="Filter journals"
+            style={{ ...styles.input, width: 200 }} />
+          <button onClick={() => setShowAddRow(s => !s)} style={styles.btnOutline}>+ Add Row</button>
           <button onClick={handleFetch} disabled={fetching || filled.length === 0} style={{
-            ...btnPrimary, opacity: (fetching || filled.length === 0) ? 0.5 : 1,
+            ...styles.btnPrimary,
+            opacity: (fetching || filled.length === 0) ? 0.5 : 1,
+            cursor: (fetching || filled.length === 0) ? "default" : "pointer",
           }}>
-            {fetching ? "Fetching..." : "Fetch Articles"}
+            {fetching ? "Fetching…" : "Fetch Articles"}
           </button>
         </div>
       </div>
 
-      {error && <div style={errorBox}>{error}</div>}
+      {error && <div style={styles.banner("error")} role="alert">{error}</div>}
+
+      {showAddRow && (
+        <div style={{ ...styles.card, marginBottom: 16 }}>
+          <h3 style={{ ...styles.h3, marginBottom: 12 }}>Add a journal row</h3>
+          {addError && <div style={styles.banner("error")} role="alert">{addError}</div>}
+          <div style={{ display: "grid", gridTemplateColumns: "70px 1fr 130px 90px 90px 90px", gap: 10, marginBottom: 12 }}>
+            {[
+              { key: "tier",    label: "Tier" },
+              { key: "journal", label: "Journal *" },
+              { key: "issn",    label: "ISSN" },
+              { key: "volume",  label: "Volume" },
+              { key: "issue",   label: "Issue" },
+              { key: "year",    label: "Year" },
+            ].map(f => (
+              <div key={f.key}>
+                <label style={styles.label}>{f.label}</label>
+                <input value={newRow[f.key]} onChange={e => setNewRow(n => ({ ...n, [f.key]: e.target.value }))}
+                  style={styles.input} />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={handleAddRow} style={styles.btnPrimary}>Add Row</button>
+            <button onClick={() => { setShowAddRow(false); setAddError(""); }} style={styles.btnOutline}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {fetching && (
-        <div style={{ background: "#2c1810", border: "1px solid #d4af7a", borderRadius: 8, padding: 20, marginBottom: 20 }}>
-          <div style={{ color: "#d4af7a", marginBottom: 10, fontSize: 14 }}>
-            Fetching from Crossref... {progress.done}/{progress.total}
-            {progress.current && <span style={{ color: "rgba(255,255,255,0.5)", marginLeft: 8 }}>— {progress.current}</span>}
+        <div style={{ ...styles.card, marginBottom: 16 }}>
+          <div style={{ color: COLORS.gold, marginBottom: 10, fontSize: 14, fontFamily: FONTS.serif }}>
+            Fetching from Crossref… {progress.done}/{progress.total}
+            {progress.current && <span style={{ color: COLORS.textMuted, marginLeft: 8 }}>— {progress.current}</span>}
           </div>
-          <div style={{ background: "#1a0f0a", borderRadius: 4, height: 8, overflow: "hidden" }}>
+          <div style={{ background: COLORS.bgPanelDeep, borderRadius: 4, height: 8, overflow: "hidden" }}>
             <div style={{
-              background: "#d4af7a", height: "100%", borderRadius: 4,
+              background: COLORS.gold, height: "100%", borderRadius: 4,
               width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%`,
               transition: "width 0.3s",
             }} />
@@ -117,343 +248,340 @@ function Phase1({ rows, setRows, onFetchComplete }) {
         </div>
       )}
 
-      <div style={{ border: "1px solid #e0d6c8", borderRadius: 8, overflow: "hidden" }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 700 }}>
-          <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
-            <tr style={{ background: "#2c1810" }}>
-              <th style={{ ...thStyle, width: 36 }}>#</th>
-              {COLS.map(c => <th key={c.key} style={{ ...thStyle, width: c.width }}>{c.label}</th>)}
-              <th style={{ ...thStyle, width: 40 }}>Del</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((row, idx) => {
-              const highlight = (row.volume && row.volume.trim()) || (row.issue && row.issue.trim());
-              return (
-                <tr key={row.id} style={{
-                  background: highlight ? "#eef4ee" : idx % 2 === 0 ? "#fff" : "#faf8f5",
-                  borderBottom: "1px solid #e8e0d4",
-                }}>
-                  <td style={{ ...tdStyle, color: "#aaa", fontSize: 11, textAlign: "center" }}>{idx + 1}</td>
-                  {COLS.map(c => (
-                    <td key={c.key} style={tdStyle}>
-                      <input value={row[c.key] || ""} onChange={e => updateCell(row.id, c.key, e.target.value)}
-                        style={{
-                          width: "100%", border: "none", background: "transparent",
-                          fontFamily: "Crimson Text, serif", fontSize: 13,
-                          color: c.key === "volume" || c.key === "issue" || c.key === "year" ? "#2c6e49" : "#333",
-                          fontWeight: c.key === "volume" ? 600 : 400,
-                          padding: "4px 6px", outline: "none",
-                        }}
-                        onFocus={e => e.target.style.background = "#fff8e8"}
-                        onBlur={e => e.target.style.background = "transparent"}
-                      />
-                    </td>
-                  ))}
-                  <td style={{ ...tdStyle, textAlign: "center" }}>
-                    <button onClick={() => deleteRow(row.id)} style={{
-                      background: "none", border: "none", color: "#ccc", cursor: "pointer", fontSize: 14, padding: "2px 6px",
-                    }}
-                      onMouseEnter={e => e.target.style.color = "#e53935"}
-                      onMouseLeave={e => e.target.style.color = "#ccc"}
-                    >✕</button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        </div>
-      </div>
-      <div style={{ marginTop: 10, color: "#aaa", fontSize: 12 }}>
-        {rows.length} journals · {filtered.length} shown · {filled.length} with volume filled
-      </div>
+      <AccessibleGrid
+        ariaLabel="Journal issues template"
+        columns={columns}
+        rows={filtered}
+        rowKey={r => r.id}
+        onEdit={handleCellEdit}
+        announce={setAnnouncement}
+      />
+
+      <p style={{ color: COLORS.textFaint, fontSize: 12, marginTop: 10 }}>
+        {rows.length} journals · {filtered.length} shown · {filled.length} with volume filled.
+        Press Enter or F2 in a cell to edit. Press Enter on the ✕ column to delete a row.
+      </p>
+
+      {rowToDelete && (
+        <ConfirmDialog
+          title="Remove journal from this installment?"
+          body={<><strong style={{ color: COLORS.gold }}>{rowToDelete.journal}</strong> will be removed
+            from this installment only. The master journal list is unaffected.</>}
+          confirmLabel="Remove"
+          onCancel={() => setConfirmDeleteId(null)}
+          onConfirm={() => handleDelete(rowToDelete)}
+        />
+      )}
     </div>
   );
 }
 
-// ─── Phase 2: Fetch Results Summary ──────────────────────────────────────────
+// ─── Stage 1 Phase 2 — Fetch results ─────────────────────────────────────────
 
-function Phase2({ results, setResults, articles, setArticles, onBack, onProceed }) {
+function Phase2({ installmentId, rows, setRows, totalArticleCount, onBack, onProceed }) {
   const [retrying, setRetrying] = useState({});
-  const [showAddRow, setShowAddRow] = useState(false);
-  const [newEntry, setNewEntry] = useState({ tier: "", journal: "", issn: "", volume: "", issue: "", year: "" });
-  const [addError, setAddError] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
+  const [announcement, setAnnouncement] = useState("");
+  const [error, setError] = useState("");
 
-  const ok     = results.filter(r => r.fetchStatus === "ok").length;
-  const empty  = results.filter(r => r.fetchStatus === "empty").length;
-  const failed = results.filter(r => r.fetchStatus === "failed").length;
+  const fetchedRows = rows.filter(r => r.fetch_status);
+  const ok     = fetchedRows.filter(r => r.fetch_status === "ok").length;
+  const empty  = fetchedRows.filter(r => r.fetch_status === "empty").length;
+  const failed = fetchedRows.filter(r => r.fetch_status === "failed").length;
 
-  async function retryOne(idx) {
-    const entry = results[idx];
-    setRetrying(r => ({ ...r, [idx]: true }));
+  const filtered = useMemo(
+    () => fetchedRows.filter(r => filterStatus === "all" || r.fetch_status === filterStatus),
+    [fetchedRows, filterStatus]
+  );
+
+  async function retryOne(row) {
+    setRetrying(r => ({ ...r, [row.id]: true }));
     try {
       const resp = await fetch(`${BACKEND}/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ issues: [entry] }),
+        body: JSON.stringify({
+          issues: [{
+            tier: String(row.tier ?? ""),
+            journal: row.journal,
+            issn: row.issn,
+            volume: row.volume || "",
+            issue: row.issue || "",
+            year: row.year || "",
+          }],
+        }),
       });
       if (resp.ok) {
         const data = await resp.json();
         const count = data.articles.length;
-        setArticles(prev => {
-          const without = prev.filter(a =>
-            !(a.journal === entry.journal && a.volume === entry.volume && a.issue === entry.issue)
-          );
-          return [...without, ...data.articles];
+        await replaceArticlesForJournalIssue(installmentId, row.id, data.articles);
+        await updateJournalIssue(row.id, {
+          fetch_status: count > 0 ? "ok" : "empty", fetch_count: count,
         });
-        setResults(prev => prev.map((r, i) =>
-          i === idx ? { ...r, fetchStatus: count > 0 ? "ok" : "empty", count } : r
-        ));
+        setRows(prev => prev.map(r => r.id === row.id
+          ? { ...r, fetch_status: count > 0 ? "ok" : "empty", fetch_count: count }
+          : r));
+        setAnnouncement(`Retried ${row.journal}: ${count} articles.`);
       } else {
-        setResults(prev => prev.map((r, i) =>
-          i === idx ? { ...r, fetchStatus: "failed" } : r
-        ));
+        await updateJournalIssue(row.id, { fetch_status: "failed", fetch_count: 0 });
+        setRows(prev => prev.map(r => r.id === row.id ? { ...r, fetch_status: "failed", fetch_count: 0 } : r));
       }
-    } catch {
-      setResults(prev => prev.map((r, i) =>
-        i === idx ? { ...r, fetchStatus: "failed" } : r
-      ));
+    } catch (err) {
+      setError(err.message || "Retry failed.");
+    } finally {
+      setRetrying(r => ({ ...r, [row.id]: false }));
     }
-    setRetrying(r => ({ ...r, [idx]: false }));
   }
 
-  async function retryAllFailed() {
-    const indices = results
-      .map((r, i) => ({ r, i }))
-      .filter(({ r }) => r.fetchStatus === "failed" || r.fetchStatus === "empty")
-      .map(({ i }) => i);
-    for (const idx of indices) await retryOne(idx);
+  async function retryAll() {
+    const todo = fetchedRows.filter(r => r.fetch_status === "failed" || r.fetch_status === "empty");
+    for (const row of todo) await retryOne(row);
   }
 
-  async function handleAddJournal() {
-    if (!newEntry.journal.trim() || !newEntry.issn.trim() || !newEntry.volume.trim()) {
-      setAddError("Journal, ISSN, and Volume are required.");
-      return;
-    }
-    setAddError("");
-    setRetrying(r => ({ ...r, new: true }));
-    try {
-      const resp = await fetch(`${BACKEND}/fetch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ issues: [newEntry] }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        const count = data.articles.length;
-        setArticles(prev => [...prev, ...data.articles]);
-        setResults(prev => [...prev, { ...newEntry, fetchStatus: count > 0 ? "ok" : "empty", count }]);
-      } else {
-        setResults(prev => [...prev, { ...newEntry, fetchStatus: "failed", count: 0 }]);
-      }
-      setNewEntry({ tier: "", journal: "", issn: "", volume: "", issue: "", year: "" });
-      setShowAddRow(false);
-    } catch {
-      setAddError("Network error. Please try again.");
-    }
-    setRetrying(r => ({ ...r, new: false }));
-  }
-
-  const filtered = results
-    .map((r, i) => ({ ...r, _idx: i }))
-    .filter(r => filterStatus === "all" || r.fetchStatus === filterStatus);
-
-  const statusStyle = {
-    ok:     { bg: "#e8f5e9", border: "#4caf50", text: "#1b5e20", label: "✓ OK" },
-    empty:  { bg: "#fff8e1", border: "#ffc107", text: "#795400", label: "⚠ Empty" },
-    failed: { bg: "#ffebee", border: "#f44336", text: "#b71c1c", label: "✕ Failed" },
+  const statusMeta = {
+    ok:     { color: COLORS.success, label: "✓ OK" },
+    empty:  { color: COLORS.warning, label: "⚠ Empty" },
+    failed: { color: COLORS.danger,  label: "✕ Failed" },
   };
 
+  const columns = useMemo(() => [
+    { key: "journal", label: "Journal", width: "minmax(220px, 2fr)",
+      render: r => <span style={{ fontStyle: "italic" }}>{r.journal}</span>,
+    },
+    { key: "issn",    label: "ISSN",    width: "120px",
+      render: r => r.issn || "—",
+    },
+    { key: "volume",  label: "Vol",     width: "60px",
+      render: r => <span style={{ color: COLORS.success, fontWeight: 600 }}>{r.volume || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    { key: "issue",   label: "Issue",   width: "60px",
+      render: r => <span style={{ color: COLORS.success }}>{r.issue || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    { key: "year",    label: "Year",    width: "70px",
+      render: r => <span style={{ color: COLORS.success }}>{r.year || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    { key: "fetch_status", label: "Status", width: "100px",
+      render: r => {
+        const m = statusMeta[r.fetch_status] || { color: COLORS.textFaint, label: "—" };
+        return <span style={{ color: m.color, fontWeight: 600, fontSize: 12 }}>{m.label}</span>;
+      },
+    },
+    { key: "fetch_count", label: "Articles", width: "80px",
+      render: r => <span style={{
+        color: r.fetch_count > 0 ? COLORS.success : COLORS.textFaint,
+        fontWeight: r.fetch_count > 0 ? 600 : 400,
+      }}>{r.fetch_count ?? "—"}</span>,
+    },
+    { key: "_retry", label: "", width: "100px",
+      render: r => {
+        if (r.fetch_status === "ok") return null;
+        if (retrying[r.id]) return <span style={{ color: COLORS.textMuted, fontSize: 12 }}>Retrying…</span>;
+        return <span aria-label="Retry fetch" style={{ color: COLORS.gold, fontSize: 12, fontWeight: 600 }}>↺ Retry</span>;
+      },
+      onActivate: (row) => {
+        if (row.fetch_status === "ok") return;
+        if (!retrying[row.id]) retryOne(row);
+      },
+    },
+  ], [retrying]);
+
+  async function handleCellEdit(row, columnKey, newValue) {
+    const patch = {};
+    if (columnKey === "volume") patch.volume = newValue ? newValue.trim() : null;
+    else if (columnKey === "issue") patch.issue = newValue ? newValue.trim() : null;
+    else if (columnKey === "year")  patch.year  = newValue ? newValue.trim() : null;
+    else return;
+    setRows(prev => prev.map(r => r.id === row.id ? { ...r, ...patch } : r));
+    try {
+      const updated = await updateJournalIssue(row.id, patch);
+      setRows(prev => prev.map(r => r.id === row.id ? { ...r, ...updated } : r));
+    } catch (err) {
+      setRows(prev => prev.map(r => r.id === row.id ? row : r));
+      setError(err.message || "Could not save.");
+    }
+  }
+
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 1000, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
+    <div style={{ padding: "28px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div role="status" aria-live="polite" style={srOnly}>{announcement}</div>
+
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, gap: 16, flexWrap: "wrap" }}>
         <div>
-          <h2 style={h2}>Stage 1 — Fetch Results</h2>
-          <p style={{ color: "#7a6a5a", fontSize: 14, margin: 0 }}>
-            Review what was fetched. Retry failed or empty journals, or add a new one before proceeding.
+          <h2 style={styles.h2}>Stage 1 — Fetch Results</h2>
+          <p style={{ color: COLORS.textMuted, fontSize: 14, margin: 0, maxWidth: 720 }}>
+            Check the per-journal results. Retry any that came back Failed or Empty, add any missing journals, then proceed to Review.
           </p>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button onClick={onBack} style={btnOutline}>← Edit Journal List</button>
+          <button onClick={onBack} style={styles.btnOutline}>← Edit Journal List</button>
           {(failed > 0 || empty > 0) && (
-            <button onClick={retryAllFailed} style={{ ...btnOutline, color: "#e65100", borderColor: "#e65100" }}>
+            <button onClick={retryAll} style={styles.btnOutline}>
               ↺ Retry All Failed/Empty ({failed + empty})
             </button>
           )}
-          <button onClick={() => setShowAddRow(s => !s)} style={btnOutline}>+ Add Journal</button>
-          <button onClick={() => onProceed(articles)} style={btnPrimary}>
-            Proceed to Review ({articles.length} articles) →
+          <button onClick={onProceed} style={styles.btnPrimary}>
+            Proceed to Review ({totalArticleCount} articles) →
           </button>
         </div>
       </div>
 
-      {/* Summary filter chips */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 18, alignItems: "center" }}>
+      {error && <div style={styles.banner("error")} role="alert">{error}</div>}
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
         {[
-          { key: "all",    label: `All (${results.length})`,  bg: "#f5f5f5", border: "#ccc",     text: "#333" },
-          { key: "ok",     label: `✓ OK (${ok})`,             ...statusStyle.ok },
-          { key: "empty",  label: `⚠ Empty (${empty})`,       ...statusStyle.empty },
-          { key: "failed", label: `✕ Failed (${failed})`,     ...statusStyle.failed },
-        ].map(s => (
-          <button key={s.key} onClick={() => setFilterStatus(s.key)} style={{
-            padding: "5px 16px", borderRadius: 20, fontFamily: "Crimson Text, serif",
-            fontSize: 13, cursor: "pointer",
-            border: `1px solid ${filterStatus === s.key ? s.border : "#d0c8b8"}`,
-            background: filterStatus === s.key ? s.bg : "#fff",
-            color: filterStatus === s.key ? s.text : "#666",
-            fontWeight: filterStatus === s.key ? 600 : 400,
-          }}>{s.label}</button>
-        ))}
-        <div style={{ marginLeft: "auto", color: "#888", fontSize: 13 }}>
-          {articles.length} articles fetched total
+          { key: "all",    label: `All (${fetchedRows.length})`, color: COLORS.goldMuted },
+          { key: "ok",     label: `✓ OK (${ok})`,                color: COLORS.success },
+          { key: "empty",  label: `⚠ Empty (${empty})`,          color: COLORS.warning },
+          { key: "failed", label: `✕ Failed (${failed})`,        color: COLORS.danger },
+        ].map(s => {
+          const active = filterStatus === s.key;
+          return (
+            <button key={s.key} onClick={() => setFilterStatus(s.key)} style={{
+              padding: "5px 14px", borderRadius: 20,
+              fontFamily: FONTS.serif, fontSize: 12, cursor: "pointer",
+              border: `1px solid ${active ? s.color : COLORS.borderSoft}`,
+              background: active ? COLORS.goldSoft : "transparent",
+              color: active ? s.color : COLORS.textMuted,
+              fontWeight: active ? 600 : 400,
+            }}>{s.label}</button>
+          );
+        })}
+        <div style={{ marginLeft: "auto", color: COLORS.textFaint, fontSize: 12 }}>
+          {totalArticleCount} articles fetched total
         </div>
       </div>
 
-      {/* Add journal form */}
-      {showAddRow && (
-        <div style={{ background: "#fffbf0", border: "1px solid #d4af7a", borderRadius: 8, padding: "16px 20px", marginBottom: 16 }}>
-          <div style={{ fontSize: 13, color: "#2c1810", fontWeight: 600, marginBottom: 12 }}>
-            Add a journal and fetch it now
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 80px 80px 80px", gap: 10, marginBottom: 10 }}>
-            {[
-              { key: "tier",    label: "Tier" },
-              { key: "journal", label: "Journal *" },
-              { key: "issn",    label: "ISSN *" },
-              { key: "volume",  label: "Volume *" },
-              { key: "issue",   label: "Issue" },
-              { key: "year",    label: "Year" },
-            ].map(f => (
-              <div key={f.key}>
-                <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>{f.label}</div>
-                <input value={newEntry[f.key]}
-                  onChange={e => setNewEntry(n => ({ ...n, [f.key]: e.target.value }))}
-                  style={{ ...inputStyle, width: "100%", padding: "5px 8px" }} />
-              </div>
-            ))}
-          </div>
-          {addError && <div style={{ color: "#e53935", fontSize: 13, marginBottom: 8 }}>{addError}</div>}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={handleAddJournal} disabled={retrying.new}
-              style={{ ...btnPrimary, opacity: retrying.new ? 0.6 : 1 }}>
-              {retrying.new ? "Fetching..." : "Fetch & Add"}
-            </button>
-            <button onClick={() => { setShowAddRow(false); setAddError(""); }} style={btnOutline}>Cancel</button>
-          </div>
-        </div>
-      )}
+      <AccessibleGrid
+        ariaLabel="Fetch results"
+        columns={columns}
+        rows={filtered}
+        rowKey={r => r.id}
+        onEdit={handleCellEdit}
+        announce={setAnnouncement}
+      />
 
-      {/* Results table */}
-      <div style={{ border: "1px solid #e0d6c8", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%" }}>
-          <thead>
-            <tr style={{ background: "#2c1810" }}>
-              {["#", "Journal", "ISSN", "Vol", "Issue", "Year", "Status", "Articles", "Action"].map(h => (
-                <th key={h} style={{ ...thStyle, width: h === "Journal" ? 240 : undefined }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 && (
-              <tr><td colSpan={9} style={{ padding: 28, textAlign: "center", color: "#aaa", fontFamily: "Crimson Text, serif" }}>
-                No results to show for this filter.
-              </td></tr>
-            )}
-            {filtered.map(({ _idx, ...row }) => {
-              const ss = statusStyle[row.fetchStatus] || statusStyle.failed;
-              const isRetrying = retrying[_idx];
-              return (
-                <tr key={_idx} style={{ background: ss.bg + "44", borderBottom: "1px solid #eee" }}>
-                  <td style={{ ...tdStyle, color: "#aaa", fontSize: 11, textAlign: "center", width: 36 }}>{_idx + 1}</td>
-                  <td style={{ ...tdStyle, fontStyle: "italic", fontSize: 13 }}>{row.journal}</td>
-                  <td style={{ ...tdStyle, fontSize: 12, color: "#888" }}>{row.issn}</td>
-                  <td style={{ ...tdStyle, fontSize: 13, fontWeight: 600, color: "#2c6e49" }}>{row.volume}</td>
-                  <td style={{ ...tdStyle, fontSize: 13, color: "#2c6e49" }}>{row.issue}</td>
-                  <td style={{ ...tdStyle, fontSize: 13, color: "#2c6e49" }}>{row.year}</td>
-                  <td style={{ ...tdStyle }}>
-                    <span style={{
-                      background: ss.bg, color: ss.text, border: `1px solid ${ss.border}`,
-                      borderRadius: 4, padding: "2px 8px", fontSize: 12, fontWeight: 600,
-                    }}>{ss.label}</span>
-                  </td>
-                  <td style={{
-                    ...tdStyle, textAlign: "center", fontSize: 13,
-                    fontWeight: row.count > 0 ? 600 : 400,
-                    color: row.count > 0 ? "#1b5e20" : "#aaa",
-                  }}>
-                    {row.count ?? "—"}
-                  </td>
-                  <td style={{ ...tdStyle }}>
-                    {(row.fetchStatus === "failed" || row.fetchStatus === "empty") && (
-                      <button onClick={() => retryOne(_idx)} disabled={isRetrying} style={{
-                        background: "none", border: `1px solid ${ss.border}`, color: ss.text,
-                        borderRadius: 4, padding: "2px 10px", fontSize: 12, cursor: "pointer",
-                        fontFamily: "Crimson Text, serif", opacity: isRetrying ? 0.5 : 1,
-                      }}>
-                        {isRetrying ? "..." : "↺ Retry"}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      <div style={{ marginTop: 8, color: "#aaa", fontSize: 12 }}>
-        {results.length} journals fetched · {ok} OK · {empty} empty · {failed} failed
+      <p style={{ color: COLORS.textFaint, fontSize: 12, marginTop: 10 }}>
+        Use the Retry column to refetch a single row. Edit Volume / Issue / Year inline before retrying if the issue you wanted is different.
+      </p>
+    </div>
+  );
+}
+
+// ─── Confirm dialog ──────────────────────────────────────────────────────────
+
+function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onCancel(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="stage1-confirm-title"
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+        display: "grid", placeItems: "center", padding: 24, zIndex: 300,
+      }}>
+      <div style={{
+        background: COLORS.bgPanel, borderRadius: 10, padding: "24px 28px",
+        maxWidth: 460, width: "100%", boxShadow: COLORS.shadowDeep,
+        border: `1px solid ${COLORS.borderSoft}`,
+      }}>
+        <h2 id="stage1-confirm-title" style={{
+          fontFamily: FONTS.display, fontSize: 20, fontWeight: 500,
+          margin: "0 0 8px", color: COLORS.gold,
+        }}>{title}</h2>
+        <p style={{ color: COLORS.textBody, fontSize: 14, lineHeight: 1.5, margin: "0 0 18px" }}>{body}</p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onCancel} style={styles.btnOutline} autoFocus>Cancel</button>
+          <button onClick={onConfirm} style={styles.btnDanger}>{confirmLabel}</button>
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── Main Stage 1 Orchestrator ────────────────────────────────────────────────
+// ─── Stage 1 orchestrator ────────────────────────────────────────────────────
 
-export default function Stage1({ job, updateJob, goToStage }) {
-  const [rows, setRows] = useState(() => {
-    if (job.journalIssues && job.journalIssues.length > 0) return job.journalIssues;
-    return [];
-  });
-  const [fetchResults, setFetchResults] = useState(() => job.fetchResults || null);
-  const [articles, setArticles] = useState(() => job.articles || []);
+export default function Stage1({ installment, goToStage, touchInstallment }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [forcePhase1, setForcePhase1] = useState(false);
 
-  useEffect(() => { updateJob({ journalIssues: rows }); }, [rows]);
-  useEffect(() => { updateJob({ fetchResults, articles }); }, [fetchResults, articles]);
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const data = await listJournalIssues(installment.id);
+        if (!cancelled) setRows(data);
+      } catch (err) {
+        if (!cancelled) setLoadError(err.message || "Could not load journal issues.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [installment.id]);
 
-  function handleFetchComplete(results, allArticles) {
-    setFetchResults(results);
-    setArticles(allArticles);
-  }
+  const anyFetched = rows.some(r => r.fetch_status);
+  const totalArticleCount = rows.reduce((n, r) => n + (r.fetch_count || 0), 0);
+  const inPhase2 = anyFetched && !forcePhase1;
 
-  function handleProceed(finalArticles) {
-    updateJob({ articles: finalArticles, stage: 2 });
-    goToStage(2);
-  }
+  if (loading) return <CenteredLoader>Loading journal issues…</CenteredLoader>;
+  if (loadError) return <CenteredError>{loadError}</CenteredError>;
 
-  if (fetchResults) {
+  if (inPhase2) {
     return (
       <Phase2
-        results={fetchResults}
-        setResults={setFetchResults}
-        articles={articles}
-        setArticles={setArticles}
-        onBack={() => setFetchResults(null)}
-        onProceed={handleProceed}
+        installmentId={installment.id}
+        rows={rows}
+        setRows={setRows}
+        totalArticleCount={totalArticleCount}
+        onBack={() => setForcePhase1(true)}
+        onProceed={() => goToStage(2)}
       />
     );
   }
 
-  return <Phase1 rows={rows} setRows={setRows} onFetchComplete={handleFetchComplete} />;
+  return (
+    <Phase1
+      installmentId={installment.id}
+      rows={rows}
+      setRows={setRows}
+      onAdvanceToPhase2={() => setForcePhase1(false)}
+      touchInstallment={touchInstallment}
+    />
+  );
 }
 
-// ─── Shared styles ────────────────────────────────────────────────────────────
-const h2 = { color: "#2c1810", fontFamily: "Crimson Text, serif", fontSize: 22, fontWeight: 400, margin: "0 0 4px" };
-const inputStyle = { padding: "6px 12px", border: "1px solid #d0c8b8", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 13, background: "#fff" };
-const btnPrimary = { background: "#2c1810", color: "#d4af7a", border: "none", padding: "8px 20px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 14, cursor: "pointer", fontWeight: 600 };
-const btnOutline = { background: "transparent", color: "#2c1810", border: "1px solid #2c1810", padding: "7px 16px", borderRadius: 5, fontFamily: "Crimson Text, serif", fontSize: 13, cursor: "pointer" };
-const thStyle = { padding: "10px 8px", color: "#d4af7a", fontFamily: "Crimson Text, serif", fontSize: 12, fontWeight: 600, textAlign: "left", letterSpacing: 0.5, borderRight: "1px solid #4a2c1a", background: "#2c1810" };
-const tdStyle = { padding: "6px 8px", verticalAlign: "middle", borderRight: "1px solid #f0e8dc", fontFamily: "Crimson Text, serif" };
-const errorBox = { background: "#ff7c7c22", border: "1px solid #ff7c7c", borderRadius: 6, padding: "10px 16px", color: "#ff7c7c", marginBottom: 16, fontSize: 14 };
+function CenteredLoader({ children }) {
+  return (
+    <div style={{
+      padding: 80, textAlign: "center", color: COLORS.textMuted,
+      fontFamily: FONTS.serif,
+    }}>{children}</div>
+  );
+}
+
+function CenteredError({ children }) {
+  return (
+    <div style={{ padding: 80, textAlign: "center", fontFamily: FONTS.serif }}>
+      <div style={{ color: COLORS.danger, marginBottom: 12 }}>{children}</div>
+      <button onClick={() => window.location.reload()} style={styles.btnOutline}>Reload</button>
+    </div>
+  );
+}
+
+const srOnly = {
+  position: "absolute",
+  width: 1, height: 1,
+  padding: 0, margin: -1, overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap", border: 0,
+};
