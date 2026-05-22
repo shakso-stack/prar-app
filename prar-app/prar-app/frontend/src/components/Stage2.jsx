@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import AccessibleGrid from "../lib/AccessibleGrid.jsx";
 import { COLORS, FONTS, styles } from "../lib/styles";
 import {
   listArticles, listKeywords, updateArticle, updateArticles, deleteArticle,
@@ -15,13 +16,19 @@ const DEFAULT_KEYWORDS = [
   "Saudi","UAE","North Africa","Middle East",
 ];
 
-// Status visual treatment — calibrated for the dark panel background.
 const STATUS_STYLE = {
   pending:         { color: COLORS.warning, bg: "rgba(232,181,115,0.10)", border: "rgba(232,181,115,0.40)" },
   approved:        { color: COLORS.success, bg: "rgba(124,191,153,0.10)", border: "rgba(124,191,153,0.40)" },
   "auto-approved": { color: COLORS.info,    bg: "rgba(133,179,212,0.10)", border: "rgba(133,179,212,0.40)" },
   excluded:        { color: COLORS.danger,  bg: "rgba(224,124,124,0.10)", border: "rgba(224,124,124,0.40)" },
 };
+
+const STATUS_OPTIONS = [
+  { value: "pending",       label: "Pending" },
+  { value: "auto-approved", label: "Auto-Approved" },
+  { value: "approved",      label: "Approved" },
+  { value: "excluded",      label: "Excluded" },
+];
 
 function getMatches(article, keywords) {
   const haystack = [article.title || "", article.abstract || "", article.journal || ""].join(" ").toLowerCase();
@@ -30,7 +37,7 @@ function getMatches(article, keywords) {
 
 export default function Stage2({ installment, goToStage }) {
   const [articles, setArticles] = useState([]);
-  const [keywordRows, setKeywordRows] = useState([]); // [{id, keyword, position}]
+  const [keywordRows, setKeywordRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
@@ -38,15 +45,14 @@ export default function Stage2({ installment, goToStage }) {
   const [journalFilter, setJournalFilter] = useState("all");
   const [keywordFilters, setKeywordFilters] = useState([]);
   const [showKeywordDropdown, setShowKeywordDropdown] = useState(false);
-  const [expanded, setExpanded] = useState(null);
-  const [editingId, setEditingId] = useState(null);
   const [showKeywords, setShowKeywords] = useState(false);
   const [newKeyword, setNewKeyword] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [announcement, setAnnouncement] = useState("");
   const [error, setError] = useState("");
 
   const keywords = useMemo(() => keywordRows.map(k => k.keyword), [keywordRows]);
 
-  // Initial load.
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -58,15 +64,12 @@ export default function Stage2({ installment, goToStage }) {
         ]);
         if (cancelled) return;
 
-        // Seed default keywords on first entry into Stage 2.
         let useKws = kws;
         if (kws.length === 0) {
           useKws = await replaceKeywordsForInstallment(installment.id, DEFAULT_KEYWORDS);
         }
         const kwList = useKws.map(k => k.keyword);
 
-        // Compute initial matches for any articles that are still pending
-        // or auto-approved (i.e. their status was never set manually).
         const updatesToPersist = [];
         const withMatches = arts.map(a => {
           const matches = getMatches(a, kwList);
@@ -76,24 +79,17 @@ export default function Stage2({ installment, goToStage }) {
           if (currentStatus === "pending" || currentStatus === "auto-approved") {
             nextStatus = hasMatch ? "auto-approved" : "pending";
           }
-          const newMatches = matches;
-          const matchesChanged = JSON.stringify(a.matched_keywords || []) !== JSON.stringify(newMatches);
+          const matchesChanged = JSON.stringify(a.matched_keywords || []) !== JSON.stringify(matches);
           const statusChanged = nextStatus !== currentStatus;
           if (matchesChanged || statusChanged) {
-            updatesToPersist.push({
-              id: a.id,
-              status: nextStatus,
-              matched_keywords: newMatches,
-            });
+            updatesToPersist.push({ id: a.id, status: nextStatus, matched_keywords: matches });
           }
-          return { ...a, status: nextStatus, matched_keywords: newMatches };
+          return { ...a, status: nextStatus, matched_keywords: matches };
         });
 
         setArticles(withMatches);
         setKeywordRows(useKws);
 
-        // Fire-and-forget persistence of computed matches/statuses. Don't
-        // block the UI on this.
         if (updatesToPersist.length > 0) {
           updateArticles(updatesToPersist).catch(err =>
             console.error("Persisting initial matches failed:", err));
@@ -110,37 +106,31 @@ export default function Stage2({ installment, goToStage }) {
 
   // ─── Mutations ──────────────────────────────────────────────────────────
 
-  async function setStatus(id, status) {
-    setArticles(prev => prev.map(a => a.id === id ? { ...a, status } : a));
-    try { await updateArticle(id, { status }); }
-    catch (err) { setError(err.message || "Could not save status."); }
-  }
+  async function handleCellEdit(row, columnKey, newValue) {
+    // Compute the patch.
+    const patch = {};
+    if (columnKey === "status") patch.status = newValue;
+    else if (["title", "abstract", "journal", "author", "link", "volume", "issue", "year"].includes(columnKey)) {
+      patch[columnKey] = newValue;
+    } else return;
 
-  async function updateField(id, field, value) {
-    setArticles(prev => prev.map(a => {
-      if (a.id !== id) return a;
-      const updated = { ...a, [field]: value };
-      if (["title", "abstract", "journal"].includes(field)) {
-        updated.matched_keywords = getMatches(updated, keywords);
-      }
-      return updated;
-    }));
+    // If the edit affects match input, recompute matched_keywords on top of the patch.
+    if (["title", "abstract", "journal"].includes(columnKey)) {
+      const next = { ...row, ...patch };
+      patch.matched_keywords = getMatches(next, keywords);
+    }
+
+    setArticles(prev => prev.map(a => a.id === row.id ? { ...a, ...patch } : a));
     try {
-      const patch = { [field]: value };
-      if (["title", "abstract", "journal"].includes(field)) {
-        const after = articles.find(a => a.id === id);
-        if (after) {
-          const newMatches = getMatches({ ...after, [field]: value }, keywords);
-          patch.matched_keywords = newMatches;
-        }
-      }
-      await updateArticle(id, patch);
+      await updateArticle(row.id, patch);
     } catch (err) {
+      setArticles(prev => prev.map(a => a.id === row.id ? row : a));
       setError(err.message || "Could not save change.");
     }
   }
 
   async function handleDeleteArticle(id) {
+    setConfirmDeleteId(null);
     const prev = articles;
     setArticles(prev.filter(a => a.id !== id));
     try { await deleteArticle(id); }
@@ -187,9 +177,6 @@ export default function Stage2({ installment, goToStage }) {
     }
   }
 
-  // When the keyword set changes, re-run the match for all articles whose
-  // status is pending or auto-approved (i.e. not manually decided), and
-  // persist any status/match changes.
   async function reapplyKeywords(kwList) {
     const updates = [];
     const nextArticles = articles.map(a => {
@@ -252,12 +239,164 @@ export default function Stage2({ installment, goToStage }) {
   }, [articles, statusFilter, journalFilter, keywordFilters]);
 
   function handleProceed() {
-    // Don't filter or strip anything destructively; Stage 3 reads articles
-    // again and filters to approved/auto-approved. Just advance stage.
     goToStage(3);
   }
 
   const approvedCount = counts.approved + counts["auto-approved"];
+
+  // ─── Grid columns ───────────────────────────────────────────────────────
+
+  const columns = useMemo(() => [
+    {
+      key: "status",
+      label: "Status",
+      width: "130px",
+      render: r => {
+        const sc = STATUS_STYLE[r.status || "pending"];
+        const label = (r.status || "pending") === "auto-approved" ? "Auto-Approved"
+          : ((r.status || "pending").charAt(0).toUpperCase() + (r.status || "pending").slice(1));
+        return (
+          <span style={{
+            background: sc.bg, color: sc.color, border: `1px solid ${sc.border}`,
+            borderRadius: 4, padding: "1px 8px",
+            fontSize: 11, fontWeight: 600, whiteSpace: "nowrap",
+          }}>{label}</span>
+        );
+      },
+      editor: { kind: "select", options: STATUS_OPTIONS },
+    },
+    {
+      key: "title",
+      label: "Title",
+      width: "minmax(220px, 2.5fr)",
+      render: r => (
+        <span title={r.title || ""} style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+          {r.title || "—"}
+        </span>
+      ),
+      editor: { kind: "text" },
+    },
+    {
+      key: "author",
+      label: "Author",
+      width: "minmax(120px, 1.2fr)",
+      render: r => r.author || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "journal",
+      label: "Journal",
+      width: "minmax(140px, 1.4fr)",
+      render: r => <span style={{ fontStyle: "italic" }}>{r.journal || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    {
+      key: "volume",
+      label: "Vol",
+      width: "55px",
+      render: r => r.volume || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "issue",
+      label: "Issue",
+      width: "55px",
+      render: r => r.issue || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "year",
+      label: "Year",
+      width: "65px",
+      render: r => r.year || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "matched_keywords",
+      label: "Keywords",
+      width: "minmax(140px, 1.2fr)",
+      render: r => {
+        const matches = r.matched_keywords || [];
+        if (matches.length === 0) {
+          return (
+            <span style={{
+              background: "rgba(232,181,115,0.15)", color: COLORS.warning,
+              border: `1px solid rgba(232,181,115,0.40)`, borderRadius: 10,
+              padding: "1px 8px", fontSize: 10, whiteSpace: "nowrap",
+            }}>⚠ No match</span>
+          );
+        }
+        return (
+          <span style={{ display: "inline-flex", gap: 3, flexWrap: "nowrap", overflow: "hidden" }}>
+            {matches.slice(0, 2).map(kw => (
+              <span key={kw} style={{
+                background: "rgba(133,179,212,0.15)", color: COLORS.info,
+                border: `1px solid rgba(133,179,212,0.40)`, borderRadius: 10,
+                padding: "1px 7px", fontSize: 10, whiteSpace: "nowrap",
+              }}>{kw}</span>
+            ))}
+            {matches.length > 2 && (
+              <span style={{ fontSize: 10, color: COLORS.info, alignSelf: "center" }}>+{matches.length - 2}</span>
+            )}
+          </span>
+        );
+      },
+    },
+    {
+      key: "_delete",
+      label: "",
+      width: "44px",
+      render: () => (
+        <span aria-label="Delete article" style={{
+          color: COLORS.danger, width: "100%", textAlign: "center", fontSize: 14,
+        }}>✕</span>
+      ),
+      onActivate: (row) => setConfirmDeleteId(row.id),
+    },
+  ], []);
+
+  function renderExpanded(art) {
+    const matches = art.matched_keywords || [];
+    return (
+      <div>
+        {matches.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: COLORS.info, marginBottom: 6, fontWeight: 600, letterSpacing: "0.5px" }}>
+              KEYWORD MATCHES ({matches.length})
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {matches.map(kw => (
+                <span key={kw} style={{
+                  background: "rgba(133,179,212,0.15)", color: COLORS.info,
+                  border: `1px solid rgba(133,179,212,0.40)`, borderRadius: 10,
+                  padding: "2px 10px", fontSize: 12,
+                }}>{kw}</span>
+              ))}
+            </div>
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>LINK</div>
+            <a href={art.link || ""} target="_blank" rel="noopener noreferrer"
+              style={{ fontSize: 13, color: COLORS.info, wordBreak: "break-all" }}>
+              {art.link || "—"}
+            </a>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>DOI</div>
+            <div style={{ fontSize: 13, color: COLORS.textBody }}>{art.doi || "—"}</div>
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>ABSTRACT</div>
+            <div style={{ fontSize: 13, lineHeight: 1.5, color: COLORS.textBody }}>
+              {art.abstract || <em style={{ color: COLORS.textFaint }}>Not available</em>}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return <div style={{ padding: 80, textAlign: "center", color: COLORS.textMuted, fontFamily: FONTS.serif }}>Loading articles…</div>;
@@ -271,9 +410,12 @@ export default function Stage2({ installment, goToStage }) {
     );
   }
 
+  const articleToDelete = confirmDeleteId ? articles.find(a => a.id === confirmDeleteId) : null;
+
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 1200, margin: "0 auto" }}>
-      {/* Header */}
+    <div style={{ padding: "28px 32px", maxWidth: 1300, margin: "0 auto" }}>
+      <div role="status" aria-live="polite" style={srOnly}>{announcement}</div>
+
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 12 }}>
         <div>
           <h2 style={styles.h2}>Stage 2 — Review Articles</h2>
@@ -300,7 +442,7 @@ export default function Stage2({ installment, goToStage }) {
 
       {error && <div style={styles.banner("error")} role="alert">{error}</div>}
 
-      {/* Review progress */}
+      {/* Review progress bar */}
       <div style={{
         background: COLORS.bgPanel, border: `1px solid ${COLORS.borderSoft}`, borderRadius: 8,
         padding: "10px 16px", marginBottom: 14,
@@ -321,7 +463,7 @@ export default function Stage2({ installment, goToStage }) {
         </div>
       </div>
 
-      {/* Keyword panel */}
+      {/* Keyword management panel */}
       {showKeywords && (
         <div style={{ ...styles.card, marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
@@ -446,238 +588,72 @@ export default function Stage2({ installment, goToStage }) {
         </div>
       </div>
 
-      {/* Table */}
-      <div style={{ border: `1px solid ${COLORS.borderSoft}`, borderRadius: 8, overflow: "hidden", background: COLORS.bgPanel }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
-          <table style={{ borderCollapse: "collapse", width: "100%", tableLayout: "fixed" }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
-              <tr style={{ background: COLORS.bgPanelDeep }}>
-                {[
-                  { label: "#", w: 36 },
-                  { label: "Status", w: 130 },
-                  { label: "Title / Author", w: 280 },
-                  { label: "Journal", w: 180 },
-                  { label: "Vol", w: 50 },
-                  { label: "Issue", w: 50 },
-                  { label: "Year", w: 60 },
-                  { label: "Keywords", w: 160 },
-                  { label: "Actions", w: 120 },
-                ].map(h => (
-                  <th key={h.label} style={thStyle(h.w)}>{h.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 && (
-                <tr><td colSpan={9} style={{ padding: 32, textAlign: "center", color: COLORS.textFaint, fontFamily: FONTS.serif }}>
-                  No articles match the current filters.
-                </td></tr>
-              )}
-              {filtered.map((art, displayIdx) => {
-                const sc = STATUS_STYLE[art.status || "pending"];
-                const isEditing = editingId === art.id;
-                const isExpanded = expanded === art.id;
-                const matches = art.matched_keywords || [];
-                return (
-                  <Row
-                    key={art.id}
-                    article={art}
-                    displayIdx={displayIdx}
-                    statusStyle={sc}
-                    isEditing={isEditing}
-                    isExpanded={isExpanded}
-                    matches={matches}
-                    onToggleExpand={() => setExpanded(isExpanded ? null : art.id)}
-                    onToggleEdit={() => setEditingId(isEditing ? null : art.id)}
-                    onDelete={() => handleDeleteArticle(art.id)}
-                    onSetStatus={(status) => setStatus(art.id, status)}
-                    onUpdateField={(field, value) => updateField(art.id, field, value)}
-                  />
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* The grid */}
+      <AccessibleGrid
+        ariaLabel="Articles to review"
+        columns={columns}
+        rows={filtered}
+        rowKey={r => r.id}
+        onEdit={handleCellEdit}
+        renderExpanded={renderExpanded}
+        announce={setAnnouncement}
+      />
 
-      <div style={{ marginTop: 10, color: COLORS.textFaint, fontSize: 12 }}>
-        {filtered.length} shown · {articles.length} total · {counts["auto-approved"]} auto-approved · {counts.approved} manually approved · {counts.excluded} excluded · {counts.pending} pending
+      <p style={{ color: COLORS.textFaint, fontSize: 12, marginTop: 10 }}>
+        Press Enter or F2 in a cell to edit. Enter on the first column expands the row to show abstract, link, and DOI.
+        Enter on the ✕ column deletes an article. Status changes save instantly.
+      </p>
+
+      {articleToDelete && (
+        <ConfirmDialog
+          title="Delete article?"
+          body={<><strong style={{ color: COLORS.gold }}>{articleToDelete.title || "(no title)"}</strong> will be
+            permanently removed from this installment. This cannot be undone.</>}
+          confirmLabel="Delete article"
+          onCancel={() => setConfirmDeleteId(null)}
+          onConfirm={() => handleDeleteArticle(articleToDelete.id)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onCancel(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="stage2-confirm-title"
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+        display: "grid", placeItems: "center", padding: 24, zIndex: 300,
+      }}>
+      <div style={{
+        background: COLORS.bgPanel, borderRadius: 10, padding: "24px 28px",
+        maxWidth: 460, width: "100%", boxShadow: COLORS.shadowDeep,
+        border: `1px solid ${COLORS.borderSoft}`,
+      }}>
+        <h2 id="stage2-confirm-title" style={{
+          fontFamily: FONTS.display, fontSize: 20, fontWeight: 500,
+          margin: "0 0 8px", color: COLORS.gold,
+        }}>{title}</h2>
+        <p style={{ color: COLORS.textBody, fontSize: 14, lineHeight: 1.5, margin: "0 0 18px" }}>{body}</p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onCancel} style={styles.btnOutline} autoFocus>Cancel</button>
+          <button onClick={onConfirm} style={styles.btnDanger}>{confirmLabel}</button>
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── Row component ───────────────────────────────────────────────────────────
-
-function Row({
-  article: art, displayIdx, statusStyle: sc, isEditing, isExpanded, matches,
-  onToggleExpand, onToggleEdit, onDelete, onSetStatus, onUpdateField,
-}) {
-  return (
-    <>
-      <tr style={{
-        background: displayIdx % 2 === 0 ? COLORS.bgPanel : COLORS.bgPanelAlt,
-        borderBottom: `1px solid ${COLORS.borderHair}`,
-      }}>
-        <td style={tdStyle({ width: 36, textAlign: "center", color: COLORS.textFaint, fontSize: 11 })}>{displayIdx + 1}</td>
-        <td style={tdStyle({ width: 130 })}>
-          <select value={art.status || "pending"} onChange={e => onSetStatus(e.target.value)}
-            aria-label="Review status"
-            style={{
-              background: sc.bg, color: sc.color, border: `1px solid ${sc.border}`,
-              borderRadius: 4, padding: "3px 6px",
-              fontFamily: FONTS.serif, fontSize: 11, cursor: "pointer", width: "100%",
-            }}>
-            <option value="pending">Pending</option>
-            <option value="auto-approved">Auto-Approved</option>
-            <option value="approved">Approved</option>
-            <option value="excluded">Excluded</option>
-          </select>
-        </td>
-        <td style={tdStyle({ width: 280 })}>
-          {isEditing
-            ? <input value={art.title || ""} onChange={e => onUpdateField("title", e.target.value)} style={cellInput} aria-label="Title" />
-            : <div>
-                <div style={{ fontWeight: 500, fontSize: 13, color: COLORS.textBody, lineHeight: 1.3 }}>{art.title || "—"}</div>
-                <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>{art.author || ""}</div>
-              </div>}
-        </td>
-        <td style={tdStyle({ width: 180, fontSize: 12 })}>
-          {isEditing ? <input value={art.journal || ""} onChange={e => onUpdateField("journal", e.target.value)} style={cellInput} aria-label="Journal" /> : (art.journal || "")}
-        </td>
-        <td style={tdStyle({ width: 50, fontSize: 12 })}>
-          {isEditing ? <input value={art.volume || ""} onChange={e => onUpdateField("volume", e.target.value)} style={cellInput} aria-label="Volume" /> : (art.volume || "")}
-        </td>
-        <td style={tdStyle({ width: 50, fontSize: 12 })}>
-          {isEditing ? <input value={art.issue || ""} onChange={e => onUpdateField("issue", e.target.value)} style={cellInput} aria-label="Issue" /> : (art.issue || "")}
-        </td>
-        <td style={tdStyle({ width: 60, fontSize: 12 })}>
-          {isEditing ? <input value={art.year || ""} onChange={e => onUpdateField("year", e.target.value)} style={cellInput} aria-label="Year" /> : (art.year || "")}
-        </td>
-        <td style={tdStyle({ width: 160 })}>
-          {matches.length > 0 ? (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-              {matches.slice(0, 3).map(kw => (
-                <span key={kw} style={{
-                  background: "rgba(133,179,212,0.15)", color: COLORS.info,
-                  border: `1px solid rgba(133,179,212,0.40)`, borderRadius: 10,
-                  padding: "1px 7px", fontSize: 10, whiteSpace: "nowrap",
-                }}>{kw}</span>
-              ))}
-              {matches.length > 3 && <span style={{ fontSize: 10, color: COLORS.info, alignSelf: "center" }}>+{matches.length - 3}</span>}
-            </div>
-          ) : (
-            <span style={{
-              background: "rgba(232,181,115,0.15)", color: COLORS.warning,
-              border: `1px solid rgba(232,181,115,0.40)`, borderRadius: 10,
-              padding: "1px 8px", fontSize: 10,
-            }}>⚠ No match</span>
-          )}
-        </td>
-        <td style={tdStyle({ width: 120 })}>
-          <div style={{ display: "flex", gap: 4 }}>
-            <button onClick={onToggleExpand} style={iconBtn(COLORS.info)} aria-label={isExpanded ? "Collapse" : "Expand"}>{isExpanded ? "▲" : "▼"}</button>
-            <button onClick={onToggleEdit} style={iconBtn(isEditing ? COLORS.success : COLORS.warning)} aria-label={isEditing ? "Finish editing" : "Edit"}>{isEditing ? "✓" : "Edit"}</button>
-            <button onClick={onDelete} style={iconBtn(COLORS.danger)} aria-label="Delete article">✕</button>
-          </div>
-        </td>
-      </tr>
-      {isExpanded && (
-        <tr style={{ background: COLORS.bgPanelDeep, borderBottom: `1px solid ${COLORS.borderHair}` }}>
-          <td colSpan={9} style={{ padding: "12px 20px" }}>
-            {matches.length > 0 && (
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 11, color: COLORS.info, marginBottom: 6, fontWeight: 600, letterSpacing: "0.5px" }}>
-                  KEYWORD MATCHES ({matches.length})
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {matches.map(kw => (
-                    <span key={kw} style={{
-                      background: "rgba(133,179,212,0.15)", color: COLORS.info,
-                      border: `1px solid rgba(133,179,212,0.40)`, borderRadius: 10,
-                      padding: "2px 10px", fontSize: 12,
-                    }}>{kw}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              <div>
-                <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>AUTHOR</div>
-                {isEditing
-                  ? <input value={art.author || ""} onChange={e => onUpdateField("author", e.target.value)} style={{ ...cellInput, width: "100%" }} aria-label="Author" />
-                  : <div style={{ fontSize: 13, color: COLORS.textBody }}>{art.author || "—"}</div>}
-              </div>
-              <div>
-                <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>LINK</div>
-                {isEditing
-                  ? <input value={art.link || ""} onChange={e => onUpdateField("link", e.target.value)} style={{ ...cellInput, width: "100%" }} aria-label="Link" />
-                  : <a href={art.link || ""} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: COLORS.info, wordBreak: "break-all" }}>{art.link || "—"}</a>}
-              </div>
-              <div style={{ gridColumn: "1 / -1" }}>
-                <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>ABSTRACT</div>
-                {isEditing
-                  ? <textarea value={art.abstract || ""} onChange={e => onUpdateField("abstract", e.target.value)}
-                      style={{ ...cellInput, width: "100%", minHeight: 80, resize: "vertical" }} aria-label="Abstract" />
-                  : <div style={{ fontSize: 13, lineHeight: 1.5, color: COLORS.textBody }}>{art.abstract || "Not available"}</div>}
-              </div>
-            </div>
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-// ─── Cell styles ─────────────────────────────────────────────────────────────
-
-function thStyle(width) {
-  return {
-    padding: "10px 8px",
-    color: COLORS.goldMuted,
-    fontFamily: FONTS.serif,
-    fontSize: 11,
-    fontWeight: 600,
-    textAlign: "left",
-    letterSpacing: "0.7px",
-    textTransform: "uppercase",
-    borderRight: `1px solid ${COLORS.borderHair}`,
-    borderBottom: `2px solid ${COLORS.gold}`,
-    background: COLORS.bgPanelDeep,
-    width, minWidth: width,
-  };
-}
-function tdStyle(extra = {}) {
-  return {
-    padding: "8px",
-    verticalAlign: "middle",
-    borderRight: `1px solid ${COLORS.borderHair}`,
-    fontFamily: FONTS.serif,
-    color: COLORS.textBody,
-    overflow: "hidden",
-    ...extra,
-  };
-}
-const cellInput = {
-  border: `1px solid ${COLORS.borderFocus}`,
-  borderRadius: 3,
-  padding: "3px 6px",
-  fontFamily: FONTS.serif,
-  fontSize: 13,
-  background: COLORS.bgPanelDeep,
-  color: COLORS.textBody,
-  width: "100%",
-  boxSizing: "border-box",
+const srOnly = {
+  position: "absolute",
+  width: 1, height: 1,
+  padding: 0, margin: -1, overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap", border: 0,
 };
-function iconBtn(color) {
-  return {
-    background: "none",
-    border: `1px solid ${color}`,
-    color,
-    borderRadius: 3,
-    padding: "2px 8px",
-    fontSize: 11,
-    cursor: "pointer",
-    fontFamily: FONTS.serif,
-  };
-}

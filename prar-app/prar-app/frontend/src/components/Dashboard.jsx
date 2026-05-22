@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import AccessibleGrid from "../lib/AccessibleGrid.jsx";
 import AddJournalModal from "./AddJournalModal.jsx";
+import BackupImportModal from "./BackupModal.jsx";
 import { COLORS, FONTS, styles } from "../lib/styles";
 import { formatDate, ORDINALS } from "../lib/util";
 import {
@@ -11,6 +12,7 @@ import {
   deleteInstallment,
   getInstallmentStatsMap,
 } from "../lib/db";
+import { exportInstallment, downloadAsJsonFile } from "../lib/backup";
 
 const STAGE_STEPS = [
   { n: 1, label: "Fetch" }, { n: 2, label: "Review" }, { n: 3, label: "Compile" },
@@ -328,6 +330,9 @@ export default function Dashboard({
   const [creating, setCreating] = useState(false);
   const [stats, setStats] = useState({});
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const [showImport, setShowImport] = useState(false);
+  const [exportingId, setExportingId] = useState(null);
+  const [exportError, setExportError] = useState("");
 
   // Load per-installment stats once on mount. Cheap enough we don't bother
   // re-loading on every change; new installments start at 0 articles.
@@ -382,6 +387,26 @@ export default function Dashboard({
     }
   }
 
+  async function handleExport(installment) {
+    setExportError("");
+    setExportingId(installment.id);
+    try {
+      const data = await exportInstallment(installment.id);
+      const safeName = installment.name.replace(/[^a-zA-Z0-9_-]+/g, "_");
+      downloadAsJsonFile(data, `${safeName}_backup.json`);
+    } catch (err) {
+      setExportError(err.message || "Could not export installment.");
+    } finally {
+      setExportingId(null);
+    }
+  }
+
+  function handleImported(installment) {
+    setShowImport(false);
+    onCreated(installment);
+    refreshStats();
+  }
+
   const installmentToDelete = pendingDeleteId
     ? installments.find(i => i.id === pendingDeleteId)
     : null;
@@ -410,6 +435,9 @@ export default function Dashboard({
               color: showManage ? COLORS.gold : COLORS.goldMuted,
             }}>
               ⚙ Manage Journal List
+            </button>
+            <button onClick={() => setShowImport(true)} style={styles.btnOutline}>
+              ↑ Import Backup
             </button>
             <button onClick={() => { setShowNew(true); setError(""); setForm({ name: "", installmentNumber: "", seasonYear: "" }); }}
               style={styles.btnPrimary}>
@@ -489,6 +517,12 @@ export default function Dashboard({
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: 8, flexShrink: 0, marginLeft: 16 }}>
+                      <button onClick={() => handleExport(inst)}
+                        disabled={exportingId === inst.id}
+                        title="Download installment as JSON backup"
+                        style={{ ...btnSmall(styles.btnSubtle), opacity: exportingId === inst.id ? 0.5 : 1 }}>
+                        {exportingId === inst.id ? "Exporting…" : "↓ Export"}
+                      </button>
                       <button onClick={() => setPendingDeleteId(inst.id)} style={btnSmall(styles.btnDanger)}>Delete</button>
                       <button onClick={() => onOpen(inst.id)} style={btnSmall(styles.btnPrimary)}>Open →</button>
                     </div>
@@ -511,6 +545,32 @@ export default function Dashboard({
           onCancel={() => setPendingDeleteId(null)}
           onConfirm={handleConfirmDelete}
         />
+      )}
+
+      {showImport && (
+        <BackupImportModal
+          userId={userId}
+          onCancel={() => setShowImport(false)}
+          onImported={handleImported}
+        />
+      )}
+
+      {exportError && (
+        <div role="alert" style={{
+          position: "fixed", bottom: 20, right: 20, zIndex: 200,
+          maxWidth: 400, padding: "12px 16px",
+          background: COLORS.bgPanel, border: `1px solid ${COLORS.danger}`,
+          borderLeft: `4px solid ${COLORS.danger}`,
+          borderRadius: 5, color: COLORS.danger,
+          fontFamily: FONTS.serif, fontSize: 13,
+          boxShadow: COLORS.shadowDeep,
+        }}>
+          <strong>Export failed: </strong>{exportError}
+          <button onClick={() => setExportError("")} style={{
+            background: "none", border: "none", color: COLORS.danger,
+            cursor: "pointer", marginLeft: 8, fontSize: 18, lineHeight: 1, padding: 0,
+          }} aria-label="Dismiss error">×</button>
+        </div>
       )}
     </div>
   );

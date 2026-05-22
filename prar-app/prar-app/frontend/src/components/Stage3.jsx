@@ -1,24 +1,31 @@
 import { useState, useEffect, useMemo } from "react";
+import AccessibleGrid from "../lib/AccessibleGrid.jsx";
 import { PART_MAP, PART_COLORS } from "../data";
 import { COLORS, FONTS, styles } from "../lib/styles";
 import { listArticles, updateArticle, deleteArticle } from "../lib/db";
 
 const PARTS = ["All Articles", "Part 1", "Part 2", "Part 3", "Part 4"];
 
-// Recompute `part` from `journal` using PART_MAP. Used as a fallback when an
-// article comes in without a part already set; backend stamps part on /fetch,
-// so usually they all have one already.
 function ensurePart(a) {
   if (a.part) return a;
   return { ...a, part: PART_MAP[(a.journal || "").trim()] || "" };
 }
+
+const PART_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "Part 1", label: "Part 1" },
+  { value: "Part 2", label: "Part 2" },
+  { value: "Part 3", label: "Part 3" },
+  { value: "Part 4", label: "Part 4" },
+];
 
 export default function Stage3({ installment, goToStage }) {
   const [articles, setArticles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [activeTab, setActiveTab] = useState("All Articles");
-  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [announcement, setAnnouncement] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -27,18 +34,15 @@ export default function Stage3({ installment, goToStage }) {
       setLoading(true);
       try {
         const all = await listArticles(installment.id);
-        // Stage 3 only sees approved/auto-approved articles.
         const approved = all
           .filter(a => a.status === "approved" || a.status === "auto-approved")
           .map(ensurePart);
-        // Persist any newly-computed parts (rare — backend usually does it).
         const needPart = approved.filter(a => {
           const wasMissing = !all.find(o => o.id === a.id)?.part;
           return wasMissing && a.part;
         });
         if (!cancelled) setArticles(approved);
         if (needPart.length > 0) {
-          // Fire-and-forget.
           Promise.all(needPart.map(a => updateArticle(a.id, { part: a.part })))
             .catch(err => console.error("Persist part failed:", err));
         }
@@ -52,28 +56,43 @@ export default function Stage3({ installment, goToStage }) {
     return () => { cancelled = true; };
   }, [installment.id]);
 
-  async function updateField(id, field, value) {
-    setArticles(prev => prev.map(a => {
-      if (a.id !== id) return a;
-      const updated = { ...a, [field]: value };
-      if (field === "journal") updated.part = PART_MAP[(value || "").trim()] || "";
-      return updated;
-    }));
+  async function handleCellEdit(row, columnKey, newValue) {
+    const patch = {};
+    if (columnKey === "part") {
+      patch.part = newValue || null;
+    } else if (["journal", "title", "author", "volume", "issue", "year", "tier", "abstract"].includes(columnKey)) {
+      patch[columnKey] = newValue;
+    } else return;
+
+    // If journal changed, recompute the suggested part (only if part is empty
+    // — don't override an explicit user choice).
+    if (columnKey === "journal" && !row.part) {
+      patch.part = PART_MAP[(newValue || "").trim()] || null;
+    }
+
+    setArticles(prev => prev.map(a => a.id === row.id ? { ...a, ...patch } : a));
     try {
-      const patch = { [field]: value };
-      if (field === "journal") patch.part = PART_MAP[(value || "").trim()] || "";
-      await updateArticle(id, patch);
+      await updateArticle(row.id, patch);
     } catch (err) {
+      setArticles(prev => prev.map(a => a.id === row.id ? row : a));
       setError(err.message || "Could not save change.");
     }
   }
 
   async function handleDelete(id) {
+    setConfirmDeleteId(null);
     const prev = articles;
     setArticles(prev.filter(a => a.id !== id));
     try { await deleteArticle(id); }
     catch (err) { setArticles(prev); setError(err.message || "Could not delete article."); }
   }
+
+  const counts = useMemo(() => {
+    const out = {};
+    for (const p of PARTS.slice(1)) out[p] = articles.filter(a => a.part === p).length;
+    return out;
+  }, [articles]);
+  const unassigned = articles.filter(a => !a.part || !PARTS.includes(a.part)).length;
 
   const tabArticles = activeTab === "All Articles"
     ? articles
@@ -84,24 +103,100 @@ export default function Stage3({ installment, goToStage }) {
     [tabArticles]
   );
 
-  const counts = useMemo(() => {
-    const out = {};
-    for (const p of PARTS.slice(1)) out[p] = articles.filter(a => a.part === p).length;
-    return out;
-  }, [articles]);
-  const unassigned = articles.filter(a => !a.part || !PARTS.includes(a.part)).length;
+  // ─── Columns ────────────────────────────────────────────────────────────
 
-  const COLS = [
-    { key: "journal",  label: "Journal",  w: 220 },
-    { key: "title",    label: "Title",    w: 280 },
-    { key: "author",   label: "Author",   w: 160 },
-    { key: "volume",   label: "Vol",      w: 50  },
-    { key: "issue",    label: "Issue",    w: 50  },
-    { key: "year",     label: "Year",     w: 60  },
-    { key: "tier",     label: "Tier",     w: 45  },
-    { key: "part",     label: "Part",     w: 90  },
-    { key: "abstract", label: "Abstract", w: 300 },
-  ];
+  const columns = useMemo(() => [
+    {
+      key: "journal",
+      label: "Journal",
+      width: "minmax(180px, 2fr)",
+      render: r => <span style={{ fontStyle: "italic", color: COLORS.gold }}>{r.journal || "—"}</span>,
+      editor: { kind: "text" },
+    },
+    {
+      key: "title",
+      label: "Title",
+      width: "minmax(220px, 2.5fr)",
+      render: r => (
+        <span title={r.title || ""}>{r.title || "—"}</span>
+      ),
+      editor: { kind: "text" },
+    },
+    {
+      key: "author",
+      label: "Author",
+      width: "minmax(120px, 1.4fr)",
+      render: r => r.author || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "volume",
+      label: "Vol",
+      width: "55px",
+      render: r => r.volume || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "issue",
+      label: "Issue",
+      width: "55px",
+      render: r => r.issue || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "year",
+      label: "Year",
+      width: "65px",
+      render: r => r.year || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "tier",
+      label: "Tier",
+      width: "55px",
+      render: r => r.tier || "—",
+      editor: { kind: "text" },
+    },
+    {
+      key: "part",
+      label: "Part",
+      width: "100px",
+      render: r => {
+        const pc = PART_COLORS[r.part];
+        if (!pc) return <span style={{ color: COLORS.textFaint, fontSize: 12 }}>—</span>;
+        return (
+          <span style={{
+            color: pc.text, fontWeight: 600, fontSize: 11,
+            background: pc.bg, padding: "2px 8px", borderRadius: 10,
+            border: `1px solid ${pc.border}`, whiteSpace: "nowrap",
+          }}>{r.part}</span>
+        );
+      },
+      editor: { kind: "select", options: PART_OPTIONS },
+    },
+    {
+      key: "_delete",
+      label: "",
+      width: "44px",
+      render: () => (
+        <span aria-label="Delete article" style={{
+          color: COLORS.danger, width: "100%", textAlign: "center", fontSize: 14,
+        }}>✕</span>
+      ),
+      onActivate: (row) => setConfirmDeleteId(row.id),
+    },
+  ], []);
+
+  function renderExpanded(art) {
+    return (
+      <div>
+        <div style={{ fontSize: 11, color: COLORS.textFaint, marginBottom: 4, letterSpacing: "0.5px" }}>ABSTRACT</div>
+        <div style={{ fontSize: 13, lineHeight: 1.5, color: COLORS.textBody }}>
+          {art.abstract || <em style={{ color: COLORS.textFaint }}>Not available</em>}
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return <div style={{ padding: 80, textAlign: "center", color: COLORS.textMuted, fontFamily: FONTS.serif }}>Loading approved articles…</div>;
@@ -115,8 +210,12 @@ export default function Stage3({ installment, goToStage }) {
     );
   }
 
+  const articleToDelete = confirmDeleteId ? articles.find(a => a.id === confirmDeleteId) : null;
+
   return (
-    <div style={{ padding: "24px 32px", maxWidth: 1200, margin: "0 auto" }}>
+    <div style={{ padding: "24px 32px", maxWidth: 1300, margin: "0 auto" }}>
+      <div role="status" aria-live="polite" style={srOnly}>{announcement}</div>
+
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
         <div>
           <h2 style={styles.h2}>Stage 3 — Compile</h2>
@@ -125,11 +224,9 @@ export default function Stage3({ installment, goToStage }) {
             Reassign via the Part column to balance counts across the four parts and group similar-subject journals together.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={() => goToStage(4)} style={styles.btnPrimary}>
-            Proceed to Generate →
-          </button>
-        </div>
+        <button onClick={() => goToStage(4)} style={styles.btnPrimary}>
+          Proceed to Generate →
+        </button>
       </div>
 
       {error && <div style={styles.banner("error")} role="alert">{error}</div>}
@@ -158,7 +255,7 @@ export default function Stage3({ installment, goToStage }) {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: "flex", borderBottom: `2px solid ${COLORS.borderSoft}`, marginBottom: 0, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", borderBottom: `2px solid ${COLORS.borderSoft}`, marginBottom: 10, flexWrap: "wrap" }}>
         {PARTS.map(p => {
           const isActive = activeTab === p;
           const pc = p === "All Articles" ? null : PART_COLORS[p];
@@ -178,156 +275,66 @@ export default function Stage3({ installment, goToStage }) {
         })}
       </div>
 
-      {/* Table */}
-      <div style={{ border: `1px solid ${COLORS.borderSoft}`, borderTop: "none", borderRadius: "0 0 8px 8px", overflow: "hidden", background: COLORS.bgPanel }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
-          <table style={{ borderCollapse: "collapse", width: "100%", tableLayout: "fixed" }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
-              <tr style={{ background: COLORS.bgPanelDeep }}>
-                <th style={thStyle(36)}>#</th>
-                {COLS.map(c => <th key={c.key} style={thStyle(c.w)}>{c.label}</th>)}
-                <th style={thStyle(40)}>Del</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.length === 0 && (
-                <tr><td colSpan={COLS.length + 2} style={{ padding: 32, textAlign: "center", color: COLORS.textFaint, fontFamily: FONTS.serif }}>
-                  No articles in this part.
-                </td></tr>
-              )}
-              {sorted.map((art, displayIdx) => {
-                const pc = PART_COLORS[art.part];
-                const isEditing = editingId === art.id;
-                const prevJournal = displayIdx > 0 ? sorted[displayIdx - 1].journal : null;
-                const showJournal = activeTab === "All Articles" ? true : art.journal !== prevJournal;
+      <AccessibleGrid
+        ariaLabel="Approved articles by part"
+        columns={columns}
+        rows={sorted}
+        rowKey={r => r.id}
+        onEdit={handleCellEdit}
+        renderExpanded={renderExpanded}
+        announce={setAnnouncement}
+      />
 
-                return (
-                  <tr key={art.id} style={{
-                    background: displayIdx % 2 === 0 ? COLORS.bgPanel : COLORS.bgPanelAlt,
-                    borderBottom: `1px solid ${COLORS.borderHair}`,
-                  }}>
-                    <td style={tdStyle({ width: 36, textAlign: "center", color: COLORS.textFaint, fontSize: 11 })}>{displayIdx + 1}</td>
-                    {COLS.map(c => (
-                      <td key={c.key} style={tdStyle({
-                        width: c.w,
-                        fontStyle: c.key === "journal" ? "italic" : undefined,
-                      })}>
-                        {isEditing ? (
-                          c.key === "part" ? (
-                            <select value={art.part || ""} onChange={e => updateField(art.id, "part", e.target.value)}
-                              aria-label="Part"
-                              style={{
-                                fontFamily: FONTS.serif, fontSize: 12,
-                                border: `1px solid ${COLORS.borderFocus}`, borderRadius: 3,
-                                padding: "2px 4px", width: "100%",
-                                background: COLORS.bgPanelDeep, color: COLORS.textBody,
-                              }}>
-                              <option value="">—</option>
-                              {["Part 1","Part 2","Part 3","Part 4"].map(p => <option key={p} value={p}>{p}</option>)}
-                            </select>
-                          ) : c.key === "abstract" ? (
-                            <textarea value={art[c.key] || ""} onChange={e => updateField(art.id, c.key, e.target.value)}
-                              aria-label={c.label}
-                              style={{ ...cellInput, width: "100%", minHeight: 60, resize: "vertical", fontSize: 11 }} />
-                          ) : (
-                            <input value={art[c.key] || ""} onChange={e => updateField(art.id, c.key, e.target.value)}
-                              aria-label={c.label}
-                              style={{ ...cellInput, width: "100%" }} />
-                          )
-                        ) : (
-                          <div style={{
-                            fontSize: c.key === "abstract" ? 11 : 13,
-                            overflow: "hidden", textOverflow: "ellipsis",
-                            whiteSpace: c.key === "abstract" ? "normal" : "nowrap",
-                            maxWidth: c.w,
-                            color: c.key === "journal" ? COLORS.gold : COLORS.textBody,
-                          }} onClick={() => setEditingId(art.id)}>
-                            {c.key === "journal" ? (showJournal ? art[c.key] : "") :
-                             c.key === "part" && pc ? <span style={{
-                               color: pc.text, fontWeight: 600, fontSize: 11,
-                               background: pc.bg, padding: "2px 8px", borderRadius: 10,
-                               border: `1px solid ${pc.border}`,
-                             }}>{art[c.key]}</span> :
-                             c.key === "abstract" ? (art[c.key] || "").slice(0, 120) + ((art[c.key] || "").length > 120 ? "…" : "") :
-                             art[c.key] || ""}
-                          </div>
-                        )}
-                      </td>
-                    ))}
-                    <td style={tdStyle({ textAlign: "center", width: 40 })}>
-                      {isEditing ? (
-                        <button onClick={() => setEditingId(null)} aria-label="Finish editing"
-                          style={iconBtn(COLORS.success)}>✓</button>
-                      ) : (
-                        <button onClick={() => handleDelete(art.id)} aria-label="Delete"
-                          style={iconBtn(COLORS.danger)}>✕</button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      <p style={{ color: COLORS.textFaint, fontSize: 12, marginTop: 10 }}>
+        {sorted.length} articles shown. Press Enter or F2 in a cell to edit. Enter on the first column expands the row to show the abstract.
+      </p>
+
+      {articleToDelete && (
+        <ConfirmDialog
+          title="Delete article?"
+          body={<><strong style={{ color: COLORS.gold }}>{articleToDelete.title || "(no title)"}</strong> will be
+            permanently removed from this installment. This cannot be undone.</>}
+          confirmLabel="Delete article"
+          onCancel={() => setConfirmDeleteId(null)}
+          onConfirm={() => handleDelete(articleToDelete.id)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onCancel(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="stage3-confirm-title"
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+        display: "grid", placeItems: "center", padding: 24, zIndex: 300,
+      }}>
+      <div style={{
+        background: COLORS.bgPanel, borderRadius: 10, padding: "24px 28px",
+        maxWidth: 460, width: "100%", boxShadow: COLORS.shadowDeep,
+        border: `1px solid ${COLORS.borderSoft}`,
+      }}>
+        <h2 id="stage3-confirm-title" style={{
+          fontFamily: FONTS.display, fontSize: 20, fontWeight: 500,
+          margin: "0 0 8px", color: COLORS.gold,
+        }}>{title}</h2>
+        <p style={{ color: COLORS.textBody, fontSize: 14, lineHeight: 1.5, margin: "0 0 18px" }}>{body}</p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onCancel} style={styles.btnOutline} autoFocus>Cancel</button>
+          <button onClick={onConfirm} style={styles.btnDanger}>{confirmLabel}</button>
         </div>
-      </div>
-      <div style={{ marginTop: 8, color: COLORS.textFaint, fontSize: 12 }}>
-        {sorted.length} articles shown · Click any cell to edit · Change "Part" column to move articles between parts.
       </div>
     </div>
   );
 }
 
-// ─── Cell styles ─────────────────────────────────────────────────────────────
-
-function thStyle(width) {
-  return {
-    padding: "10px 8px",
-    color: COLORS.goldMuted,
-    fontFamily: FONTS.serif,
-    fontSize: 11, fontWeight: 600,
-    textAlign: "left",
-    letterSpacing: "0.7px", textTransform: "uppercase",
-    borderRight: `1px solid ${COLORS.borderHair}`,
-    borderBottom: `2px solid ${COLORS.gold}`,
-    background: COLORS.bgPanelDeep,
-    whiteSpace: "nowrap",
-    width, minWidth: width,
-  };
-}
-function tdStyle(extra = {}) {
-  return {
-    padding: "5px 8px",
-    verticalAlign: "top",
-    borderRight: `1px solid ${COLORS.borderHair}`,
-    fontFamily: FONTS.serif,
-    color: COLORS.textBody,
-    cursor: "text",
-    overflow: "hidden",
-    ...extra,
-  };
-}
-const cellInput = {
-  border: `1px solid ${COLORS.borderFocus}`,
-  borderRadius: 3,
-  padding: "3px 6px",
-  fontFamily: FONTS.serif,
-  fontSize: 13,
-  background: COLORS.bgPanelDeep,
-  color: COLORS.textBody,
-  boxSizing: "border-box",
-};
-function iconBtn(color) {
-  return {
-    background: "none",
-    border: `1px solid ${color}`,
-    color,
-    borderRadius: 3,
-    padding: "2px 7px",
-    fontSize: 11,
-    cursor: "pointer",
-    fontFamily: FONTS.serif,
-  };
-}
 function summaryCard(border, text, bg) {
   return {
     background: bg, border: `1px solid ${border}`, borderRadius: 8,
@@ -336,3 +343,11 @@ function summaryCard(border, text, bg) {
     fontFamily: FONTS.serif, minWidth: 90,
   };
 }
+
+const srOnly = {
+  position: "absolute",
+  width: 1, height: 1,
+  padding: 0, margin: -1, overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap", border: 0,
+};
