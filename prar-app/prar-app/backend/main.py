@@ -3,6 +3,8 @@ PRAR App — FastAPI Backend
 Handles: Crossref/OpenAlex fetching, docx generation, Excel export
 """
 
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -17,11 +19,29 @@ import zipfile
 
 app = FastAPI(title="PRAR Backend")
 
+# ─── CORS ────────────────────────────────────────────────────────────────────
+#
+# Allow-list approach: explicit production / custom domains via the
+# ALLOWED_ORIGINS environment variable (comma-separated, no spaces), plus a
+# regex that matches Vercel's auto-generated preview deployment URLs for this
+# project. To temporarily disable the lockdown during debugging, set
+# ALLOWED_ORIGIN_REGEX=".*" in the Render environment.
+
+_explicit = os.environ.get("ALLOWED_ORIGINS", "").strip()
+ALLOWED_ORIGINS = [o.strip() for o in _explicit.split(",") if o.strip()]
+
+ALLOWED_ORIGIN_REGEX = os.environ.get(
+    "ALLOWED_ORIGIN_REGEX",
+    r"^https://prar-[a-z0-9-]+-shakso-s-projects\.vercel\.app$",
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 CROSSREF_BASE = "https://api.crossref.org/works"
